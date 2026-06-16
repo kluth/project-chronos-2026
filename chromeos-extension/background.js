@@ -4,6 +4,32 @@ console.log("[Chronos] ChromeOS Sidecar initialized. Interaction detection activ
 let currentInterval = 10000; // Default 10 second ingestion cycle
 let schedulerTimeoutId = null;
 
+let keystrokeEvents = [];
+let mouseEvents = [];
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message && message.type === 'user_activity_metrics') {
+    const now = Date.now();
+    keystrokeEvents.push({ timestamp: now, count: message.keystrokes });
+    mouseEvents.push({ timestamp: now, distance: message.mousePixels });
+  }
+});
+
+function getMetricsPerMinute() {
+  const now = Date.now();
+  const limit = now - 60000;
+
+  // Filter events within last 60 seconds
+  keystrokeEvents = keystrokeEvents.filter(e => e.timestamp >= limit);
+  mouseEvents = mouseEvents.filter(e => e.timestamp >= limit);
+
+  // Compute sums
+  const keystrokes_per_minute = keystrokeEvents.reduce((sum, e) => sum + e.count, 0);
+  const mouse_pixels_per_minute = mouseEvents.reduce((sum, e) => sum + e.distance, 0);
+
+  return { keystrokes_per_minute, mouse_pixels_per_minute };
+}
+
 // Helper to get secret key from local storage
 async function getSecret() {
   return new Promise((resolve) => {
@@ -18,15 +44,17 @@ async function shouldExclude(title, url) {
   return new Promise((resolve) => {
     chrome.storage.local.get(["privacyFilters"], (result) => {
       const filters = result.privacyFilters || [];
-      for (const pattern of filters) {
-        try {
-          const regex = new RegExp(pattern, "i");
-          if (regex.test(title) || regex.test(url)) {
-            resolve(true);
-            return;
+      if (Array.isArray(filters)) {
+        for (const pattern of filters) {
+          try {
+            const regex = new RegExp(pattern, "i");
+            if (regex.test(title) || regex.test(url)) {
+              resolve(true);
+              return;
+            }
+          } catch (e) {
+            console.error(`[Chronos] Invalid regex filter: ${pattern}`, e);
           }
-        } catch (e) {
-          console.error(`[Chronos] Invalid regex filter: ${pattern}`, e);
         }
       }
       resolve(false);
@@ -60,94 +88,54 @@ function scheduleNextIngestion() {
 
 function performIngestionCycle() {
   // Query the system to see if the user has physically interacted (mouse/keyboard) in the last 15 seconds
-  chrome.idle.queryState(15, (idleState) => {
+  chrome.idle.queryState(15, async (idleState) => {
     if (idleState !== "active") {
       console.log(`[Chronos] User is ${idleState}. Dropping telemetry to prevent false efficiency metrics.`);
       scheduleNextIngestion();
       return; // Do not send data if the user is AFK/Idle
     }
 
-    // Query all Chrome windows to satisfy multi-window focus tracking (F45)
-    chrome.windows.getAll({ populate: true }, async (windows) => {
-      if (!windows || windows.length === 0) {
-        scheduleNextIngestion();
-        return;
+    const { keystrokes_per_minute, mouse_pixels_per_minute } = getMetricsPerMinute();
+
+    // Stream the raw data to the local C++ Daemon via localhost loopback
+    try {
+      const path = "/ingest";
+      const body = JSON.stringify({
+        keystrokes_per_minute: keystrokes_per_minute,
+        mouse_pixels_per_minute: mouse_pixels_per_minute
+      });
+
+      const headers = { 'Content-Type': 'application/json' };
+      
+      // Retrieve and apply IPC signing (F43)
+      const secret = await getSecret();
+      if (secret) {
+        const timestamp = Date.now().toString();
+        const signature = await generateSignature(secret, "POST", path, timestamp, body);
+        headers['X-Timestamp'] = timestamp;
+        headers['X-Signature'] = signature;
       }
 
-      let focusedWindowIndex = -1;
-      const windowDataList = [];
+      const response = await fetch(`http://localhost:8888${path}`, {
+        method: 'POST',
+        headers: headers,
+        body: body
+      });
 
-      for (let i = 0; i < windows.length; i++) {
-        const win = windows[i];
-        if (win.focused) {
-          focusedWindowIndex = i;
+      if (response.ok) {
+        const resJson = await response.json();
+        if (resJson && resJson.requested_interval) {
+          // Adjust ingestion cycle interval dynamically (F40)
+          currentInterval = resJson.requested_interval;
+          console.log(`[Chronos] Dynamic Ingestion Interval set to ${currentInterval}ms`);
         }
-
-        const activeTab = win.tabs ? win.tabs.find(t => t.active) : null;
-        windowDataList.push({
-          windowIndex: i,
-          title: activeTab ? activeTab.title : "Unknown ChromeOS App",
-          url: activeTab ? activeTab.url : "",
-          focused: win.focused
-        });
       }
+    } catch (err) {
+      // Silently fail if the C++ daemon inside Crostini is offline
+      console.warn("[Chronos] Telemetry transmission failed.", err);
+    }
 
-      console.log(`[Chronos] Active windows tracked:`, windowDataList, `Focused Index: ${focusedWindowIndex}`);
-
-      // Extract focused window tab info for primary logging
-      const focusedTabInfo = windowDataList.find(w => w.focused) || windowDataList[0];
-      const activeTitle = focusedTabInfo.title;
-      const activeUrl = focusedTabInfo.url;
-
-      // Privacy Masking Check (F38)
-      const excluded = await shouldExclude(activeTitle, activeUrl);
-      if (excluded) {
-        console.log(`[Chronos] Privacy Exclusion Match for active tab: Title: "${activeTitle}" URL: "${activeUrl}". Dropping payload.`);
-        scheduleNextIngestion();
-        return;
-      }
-
-      // Stream the raw data to the local C++ Daemon via localhost loopback
-      try {
-        const path = "/ingest";
-        const body = JSON.stringify({
-          window: activeTitle,
-          windows: windowDataList,
-          focusedWindowIndex: focusedWindowIndex
-        });
-
-        const headers = { 'Content-Type': 'application/json' };
-        
-        // Retrieve and apply IPC signing (F43)
-        const secret = await getSecret();
-        if (secret) {
-          const timestamp = Date.now().toString();
-          const signature = await generateSignature(secret, "POST", path, timestamp, body);
-          headers['X-Timestamp'] = timestamp;
-          headers['X-Signature'] = signature;
-        }
-
-        const response = await fetch(`http://localhost:8888${path}`, {
-          method: 'POST',
-          headers: headers,
-          body: body
-        });
-
-        if (response.ok) {
-          const resJson = await response.json();
-          if (resJson && resJson.requested_interval) {
-            // Adjust ingestion cycle interval dynamically (F40)
-            currentInterval = resJson.requested_interval;
-            console.log(`[Chronos] Dynamic Ingestion Interval set to ${currentInterval}ms`);
-          }
-        }
-      } catch (err) {
-        // Silently fail if the C++ daemon inside Crostini is offline
-        console.warn("[Chronos] Telemetry transmission failed.", err);
-      }
-
-      scheduleNextIngestion();
-    });
+    scheduleNextIngestion();
   });
 }
 
