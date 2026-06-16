@@ -36,11 +36,48 @@
 // For SQLite3
 #include <sqlite3.h>
 
+#include <mutex>
+#include <unordered_map>
+
+std::mutex g_config_mutex;
+std::unordered_map<std::string, long long> g_processed_signatures;
+std::mutex g_signatures_mutex;
+
 // Define global configuration
 DPConfig g_config;
 std::atomic<bool> g_tracking_paused(false);
+std::atomic<bool> g_dbus_paused(false);
 std::atomic<bool> g_override_paused(false);
 std::chrono::steady_clock::time_point g_override_paused_until;
+
+bool parseDouble(const std::string& str, double& val) {
+    std::stringstream ss(str);
+    return (ss >> val) && ss.eof();
+}
+
+bool extractDouble(const std::string& json, const std::string& key, double& out_val) {
+    size_t key_pos = json.find("\"" + key + "\"");
+    if (key_pos == std::string::npos) return false;
+    
+    size_t colon_pos = json.find(":", key_pos);
+    if (colon_pos == std::string::npos) return false;
+    
+    size_t start = colon_pos + 1;
+    while (start < json.size() && (std::isspace(json[start]) || json[start] == '"')) {
+        start++;
+    }
+    
+    size_t end = start;
+    while (end < json.size() && (std::isdigit(json[end]) || json[end] == '.' || json[end] == '-' || json[end] == '+' || json[end] == 'e' || json[end] == 'E')) {
+        end++;
+    }
+    
+    if (end > start) {
+        std::string val_str = json.substr(start, end - start);
+        return parseDouble(val_str, out_val);
+    }
+    return false;
+}
 
 double generateLaplaceNoise(double sensitivity, double epsilon) {
     // scale (b) = sensitivity / epsilon
@@ -61,7 +98,12 @@ TelemetryEvent anonymizeEvent(const TelemetryEvent& raw_event, double epsilon) {
     TelemetryEvent anonymized = raw_event;
     
     // Use the sensitivity from global configuration
-    double noise = generateLaplaceNoise(g_config.sensitivity, epsilon);
+    double sensitivity;
+    {
+        std::lock_guard<std::mutex> lock(g_config_mutex);
+        sensitivity = g_config.sensitivity;
+    }
+    double noise = generateLaplaceNoise(sensitivity, epsilon);
     anonymized.value += noise;
     
     return anonymized;
@@ -160,6 +202,9 @@ bool isNetworkOnline() {
 
 // F46: Local Domain Obfuscation Mapping
 std::string obfuscateDomainOrCategory(const std::string& input) {
+    if (input == "keystrokes_per_minute" || input == "mouse_pixels_per_minute") {
+        return input;
+    }
     if (input.empty()) {
         return "generic-activity";
     }
@@ -182,7 +227,13 @@ std::string obfuscateDomainOrCategory(const std::string& input) {
         if (clean.rfind("www.", 0) == 0) {
             clean = clean.substr(4);
         }
-        return clean;
+        std::string cleaned = "";
+        for (char c : clean) {
+            if (std::isalnum(static_cast<unsigned char>(c)) || c == '.' || c == '-') {
+                cleaned += c;
+            }
+        }
+        return cleaned;
     }
 
     // Window title: lowercase for matching
@@ -245,6 +296,15 @@ std::string obfuscateDomainOrCategory(const std::string& input) {
             if (cand_end != std::string::npos) {
                 domain_candidate = domain_candidate.substr(0, cand_end);
             }
+            
+            std::string cleaned = "";
+            for (char c : domain_candidate) {
+                if (std::isalnum(static_cast<unsigned char>(c)) || c == '.' || c == '-') {
+                    cleaned += c;
+                }
+            }
+            domain_candidate = cleaned;
+            
             if (!domain_candidate.empty()) {
                 return domain_candidate;
             }
@@ -366,7 +426,7 @@ std::vector<BufferedEvent> getBufferedEvents(const std::string& db_path) {
         return events;
     }
 
-    const char* sql = "SELECT id, metric_name, value FROM telemetry_events ORDER BY id ASC;";
+    const char* sql = "SELECT id, metric_name, value FROM telemetry_events ORDER BY id ASC LIMIT 1000;";
     sqlite3_stmt* stmt = nullptr;
     rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
@@ -585,70 +645,7 @@ std::vector<std::string> scanNativeProcesses() {
     return detected;
 }
 
-// F44: Device Resource Performance Telemetry
-bool readCpuStats(CpuStats& stats) {
-    std::ifstream file("/proc/stat");
-    if (!file.is_open()) return false;
-    std::string line;
-    if (std::getline(file, line)) {
-        std::stringstream ss(line);
-        std::string cpu;
-        ss >> cpu;
-        if (cpu == "cpu") {
-            ss >> stats.user >> stats.nice >> stats.system >> stats.idle
-               >> stats.iowait >> stats.irq >> stats.softirq >> stats.steal;
-            return true;
-        }
-    }
-    return false;
-}
 
-double calculateCpuUtilization(const CpuStats& prev, const CpuStats& curr) {
-    unsigned long long prev_idle = prev.idle + prev.iowait;
-    unsigned long long curr_idle = curr.idle + curr.iowait;
-    
-    unsigned long long prev_non_idle = prev.user + prev.nice + prev.system + prev.irq + prev.softirq + prev.steal;
-    unsigned long long curr_non_idle = curr.user + curr.nice + curr.system + curr.irq + curr.softirq + curr.steal;
-    
-    unsigned long long prev_total = prev_idle + prev_non_idle;
-    unsigned long long curr_total = curr_idle + curr_non_idle;
-    
-    unsigned long long total_d = curr_total - prev_total;
-    unsigned long long idle_d = curr_idle - prev_idle;
-    
-    if (total_d == 0) return 0.0;
-    return static_cast<double>(total_d - idle_d) / total_d * 100.0;
-}
-
-bool getRamUtilization(double& ram_percent) {
-    std::ifstream file("/proc/meminfo");
-    if (!file.is_open()) return false;
-    
-    unsigned long long mem_total = 0;
-    unsigned long long mem_available = 0;
-    std::string key;
-    unsigned long long value;
-    std::string unit;
-    
-    int found_count = 0;
-    while (file >> key >> value >> unit) {
-        if (key == "MemTotal:") {
-            mem_total = value;
-            found_count++;
-        } else if (key == "MemAvailable:") {
-            mem_available = value;
-            found_count++;
-        }
-        if (found_count == 2) break;
-    }
-    
-    if (mem_total == 0) return false;
-    if (mem_available == 0) {
-        return false;
-    }
-    ram_percent = static_cast<double>(mem_total - mem_available) / mem_total * 100.0;
-    return true;
-}
 
 // F47: Automated Shared Folder Snapshots
 std::string getBackupDirPath() {
@@ -777,39 +774,65 @@ std::string computeHmacSha256(const std::string& secret, const std::string& mess
 }
 
 bool constantTimeCompare(const std::string& a, const std::string& b) {
-    if (a.length() != b.length()) return false;
-    int diff = 0;
-    for (size_t i = 0; i < a.length(); ++i) {
-        diff |= (a[i] ^ b[i]);
+    size_t len_a = a.length();
+    size_t len_b = b.length();
+    size_t cmp_len = (len_a == len_b) ? len_a : len_b;
+    int diff = (len_a != len_b);
+    for (size_t i = 0; i < cmp_len; ++i) {
+        char ca = (i < len_a) ? a[i] : 0;
+        char cb = (i < len_b) ? b[i] : 0;
+        diff |= (ca ^ cb);
     }
     return diff == 0;
 }
 
 std::string getHeaderValue(const std::string& request, const std::string& header_name) {
-    size_t pos = request.find(header_name + ":");
-    if (pos == std::string::npos) {
-        std::string lower_header = header_name;
-        std::transform(lower_header.begin(), lower_header.end(), lower_header.begin(), ::tolower);
-        pos = request.find(lower_header + ":");
-        if (pos == std::string::npos) return "";
+    size_t header_end = request.find("\r\n\r\n");
+    if (header_end == std::string::npos) {
+        header_end = request.find("\n\n");
     }
+    std::string header_section = (header_end == std::string::npos) ? request : request.substr(0, header_end);
     
-    size_t start = pos + header_name.length() + 1;
-    size_t end = request.find("\r\n", start);
-    if (end == std::string::npos) {
-        end = request.find("\n", start);
+    std::istringstream stream(header_section);
+    std::string line;
+    std::string target_lower = header_name;
+    std::transform(target_lower.begin(), target_lower.end(), target_lower.begin(), ::tolower);
+    
+    while (std::getline(stream, line)) {
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+        size_t colon_pos = line.find(':');
+        if (colon_pos == std::string::npos) continue;
+        
+        std::string key = line.substr(0, colon_pos);
+        std::transform(key.begin(), key.end(), key.begin(), ::tolower);
+        size_t key_first = key.find_first_not_of(" \t");
+        size_t key_last = key.find_last_not_of(" \t");
+        if (key_first != std::string::npos && key_last != std::string::npos) {
+            key = key.substr(key_first, key_last - key_first + 1);
+        }
+        
+        if (key == target_lower) {
+            std::string val = line.substr(colon_pos + 1);
+            size_t val_first = val.find_first_not_of(" \t");
+            size_t val_last = val.find_last_not_of(" \t");
+            if (val_first == std::string::npos || val_last == std::string::npos) {
+                return "";
+            }
+            return val.substr(val_first, val_last - val_first + 1);
+        }
     }
-    if (end == std::string::npos) return "";
-    
-    std::string val = request.substr(start, end - start);
-    size_t first = val.find_first_not_of(" \t");
-    size_t last = val.find_last_not_of(" \t\r\n");
-    if (first == std::string::npos || last == std::string::npos) return "";
-    return val.substr(first, last - first + 1);
+    return "";
 }
 
 bool verifySignature(const std::string& method, const std::string& path, const std::string& request, const std::string& body) {
-    if (g_config.secret.empty()) {
+    std::string config_secret;
+    {
+        std::lock_guard<std::mutex> lock(g_config_mutex);
+        config_secret = g_config.secret;
+    }
+    if (config_secret.empty()) {
         return true;
     }
     
@@ -831,51 +854,115 @@ bool verifySignature(const std::string& method, const std::string& path, const s
     auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
     
-    if (std::abs(now_ms - request_time) > 60000) {
-        std::cerr << "[Security IPC] Verification failed: replay attack window exceeded." << std::endl;
+    // Future timestamp check (overflow-safe)
+    if (request_time > now_ms + 5000) {
+        std::cerr << "[Security IPC] Verification failed: future timestamp limit exceeded." << std::endl;
         return false;
     }
     
+    // Replay attack window check (expired timestamp > 60s, overflow-safe)
+    if (now_ms >= request_time) {
+        if (now_ms - request_time > 60000) {
+            std::cerr << "[Security IPC] Verification failed: replay attack window exceeded." << std::endl;
+            return false;
+        }
+    }
+    
+    // Compute expected HMAC and compare in constant time outside the lock
     std::string message = method + "\n" + path + "\n" + timestamp_str + "\n" + body;
-    std::string expected_sig = computeHmacSha256(g_config.secret, message);
+    std::string expected_sig = computeHmacSha256(config_secret, message);
     
     if (!constantTimeCompare(sig, expected_sig)) {
         std::cerr << "[Security IPC] Verification failed: signature mismatch." << std::endl;
         return false;
     }
+    
+    // Once signature is verified, perform replay check and map insertion in a single lock scope
+    {
+        std::lock_guard<std::mutex> lock_sig(g_signatures_mutex);
+        
+        // Prune signatures older than 60 seconds (overflow-safe)
+        for (auto it = g_processed_signatures.begin(); it != g_processed_signatures.end(); ) {
+            if (now_ms >= it->second) {
+                if (now_ms - it->second > 60000) {
+                    it = g_processed_signatures.erase(it);
+                    continue;
+                }
+            } else if (it->second > now_ms + 5000) {
+                it = g_processed_signatures.erase(it);
+                continue;
+            }
+            ++it;
+        }
+        
+        // Perform replay check
+        if (g_processed_signatures.find(sig) != g_processed_signatures.end()) {
+            std::cerr << "[Security IPC] Verification failed: replay attack detected." << std::endl;
+            return false;
+        }
+        
+        // Insert signature
+        g_processed_signatures[sig] = request_time;
+    }
+    
     return true;
 }
 
 int getBatteryLevel(bool& discharging, const std::string& base_dir) {
     discharging = false;
-    if (!std::filesystem::exists(base_dir)) return -1;
+    std::error_code ec;
+    if (!std::filesystem::exists(base_dir, ec) || ec) return -1;
+    
+    auto it = std::filesystem::directory_iterator(base_dir, ec);
+    if (ec) return -1;
     
     int min_capacity = -1;
-    for (const auto& entry : std::filesystem::directory_iterator(base_dir)) {
-        std::ifstream status_file(entry.path() / "status");
-        std::ifstream cap_file(entry.path() / "capacity");
-        
-        if (status_file.is_open() && cap_file.is_open()) {
-            std::string status;
-            int capacity = -1;
-            if (status_file >> status && cap_file >> capacity) {
-                if (status == "Discharging") {
-                    discharging = true;
-                    return capacity;
-                }
-                if (min_capacity == -1 || capacity < min_capacity) {
-                    min_capacity = capacity;
+    int lowest_discharging_capacity = -1;
+    
+    try {
+        for (const auto& entry : it) {
+            std::string filename = entry.path().filename().string();
+            if (filename.size() < 3 || 
+                std::toupper(static_cast<unsigned char>(filename[0])) != 'B' ||
+                std::toupper(static_cast<unsigned char>(filename[1])) != 'A' ||
+                std::toupper(static_cast<unsigned char>(filename[2])) != 'T') {
+                continue;
+            }
+
+            std::ifstream status_file(entry.path() / "status");
+            std::ifstream cap_file(entry.path() / "capacity");
+            
+            if (status_file.is_open() && cap_file.is_open()) {
+                std::string status;
+                int capacity = -1;
+                if (status_file >> status && cap_file >> capacity) {
+                    if (status == "Discharging") {
+                        discharging = true;
+                        if (lowest_discharging_capacity == -1 || capacity < lowest_discharging_capacity) {
+                            lowest_discharging_capacity = capacity;
+                        }
+                    }
+                    if (min_capacity == -1 || capacity < min_capacity) {
+                        min_capacity = capacity;
+                    }
                 }
             }
         }
+    } catch (...) {
+        std::cerr << "[Battery Monitor] Exception during battery directory iteration" << std::endl;
+    }
+    
+    if (discharging) {
+        return lowest_discharging_capacity;
     }
     return min_capacity;
 }
 
 bool isTelemetryPaused() {
-    if (g_tracking_paused) {
+    if (g_tracking_paused || g_dbus_paused) {
         return true;
     }
+    std::lock_guard<std::mutex> lock(g_config_mutex);
     if (g_override_paused) {
         if (std::chrono::steady_clock::now() >= g_override_paused_until) {
             g_override_paused = false;

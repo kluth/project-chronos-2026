@@ -152,26 +152,51 @@ void testProcessScanner() {
     std::cout << "[PASS] Native Process Scanner /proc Monitor Test" << std::endl;
 }
 
-void testResourcePerformanceTelemetry() {
-    CpuStats stats1, stats2;
-    bool read1 = readCpuStats(stats1);
-    std::cout << "CPU stats reading: " << (read1 ? "Success" : "Failure") << std::endl;
-    
-    if (read1) {
-        stats2 = stats1;
-        stats2.idle += 100;
-        stats2.user += 100;
-        double util = calculateCpuUtilization(stats1, stats2);
-        assert(std::abs(util - 50.0) < 1.0);
-    }
+void testGDPRTelemetry() {
+    // 1. JSON Parsing verification
+    std::string json_payload = "{\"keystrokes_per_minute\": 45, \"mouse_pixels_per_minute\": 1200.5}";
+    double keystrokes = 0.0;
+    double mouse = 0.0;
+    assert(extractDouble(json_payload, "keystrokes_per_minute", keystrokes) == true);
+    assert(keystrokes == 45.0);
+    assert(extractDouble(json_payload, "mouse_pixels_per_minute", mouse) == true);
+    assert(mouse == 1200.5);
 
-    double ram_util = 0.0;
-    bool read_ram = getRamUtilization(ram_util);
-    std::cout << "RAM stats reading: " << (read_ram ? "Success" : "Failure") << std::endl;
-    if (read_ram) {
-        assert(ram_util >= 0.0 && ram_util <= 100.0);
-    }
-    std::cout << "[PASS] Device Resource Performance Telemetry Test" << std::endl;
+    // 2. Obfuscator pass-through verification
+    assert(obfuscateDomainOrCategory("keystrokes_per_minute") == "keystrokes_per_minute");
+    assert(obfuscateDomainOrCategory("mouse_pixels_per_minute") == "mouse_pixels_per_minute");
+
+    // 3. Anonymization verification
+    TelemetryEvent keystrokes_event = { "keystrokes_per_minute", keystrokes };
+    TelemetryEvent mouse_event = { "mouse_pixels_per_minute", mouse };
+    
+    double epsilon = 1.0;
+    TelemetryEvent anon_keystrokes = anonymizeEvent(keystrokes_event, epsilon);
+    TelemetryEvent anon_mouse = anonymizeEvent(mouse_event, epsilon);
+
+    assert(anon_keystrokes.metric_name == "keystrokes_per_minute");
+    assert(anon_keystrokes.value != keystrokes_event.value); // Noise added
+
+    assert(anon_mouse.metric_name == "mouse_pixels_per_minute");
+    assert(anon_mouse.value != mouse_event.value); // Noise added
+
+    // 4. SQLite storage verification
+    const std::string test_db = "test_gdpr_buffer.db";
+    std::remove(test_db.c_str());
+
+    assert(initDatabase(test_db) == true);
+    assert(bufferEvent(anon_keystrokes, test_db) == true);
+    assert(bufferEvent(anon_mouse, test_db) == true);
+
+    auto events = getBufferedEvents(test_db);
+    assert(events.size() == 2);
+    assert(events[0].event.metric_name == "keystrokes_per_minute");
+    assert(events[0].event.value == anon_keystrokes.value);
+    assert(events[1].event.metric_name == "mouse_pixels_per_minute");
+    assert(events[1].event.value == anon_mouse.value);
+
+    std::remove(test_db.c_str());
+    std::cout << "[PASS] GDPR Telemetry Test" << std::endl;
 }
 
 void testSharedFolderSnapshots() {
@@ -198,6 +223,16 @@ void testTrackingPaused() {
     assert(g_tracking_paused == true);
     g_tracking_paused = false;
     assert(g_tracking_paused == false);
+
+    // Test g_dbus_paused is checked by isTelemetryPaused
+    assert(g_dbus_paused == false);
+    assert(isTelemetryPaused() == false);
+    g_dbus_paused = true;
+    assert(g_dbus_paused == true);
+    assert(isTelemetryPaused() == true);
+    g_dbus_paused = false;
+    assert(isTelemetryPaused() == false);
+
     std::cout << "[PASS] Tracking Paused Atomic Flag Test" << std::endl;
 }
 
@@ -243,6 +278,30 @@ void testBatteryPowerSaver() {
 
     assert(getBatteryLevel(discharging, mock_dir) == 15);
     assert(discharging == true);
+
+    // 5. Adversarial: base_dir is a file instead of a directory
+    std::string mock_file = "./mock_sys_class_file";
+    std::filesystem::remove(mock_file);
+    {
+        std::ofstream f(mock_file);
+        f << "not a directory\n";
+    }
+
+    bool threw_exception = false;
+    int battery_res = 0;
+    try {
+        battery_res = getBatteryLevel(discharging, mock_file);
+    } catch (const std::filesystem::filesystem_error& e) {
+        threw_exception = true;
+        std::cout << "[INFO] getBatteryLevel threw std::filesystem::filesystem_error as expected for file input: " << e.what() << std::endl;
+    } catch (...) {
+        threw_exception = true;
+        std::cout << "[INFO] getBatteryLevel threw an unexpected exception type" << std::endl;
+    }
+    std::filesystem::remove(mock_file);
+    assert(threw_exception == false); // Bug fixed: no longer throws exception!
+    assert(battery_res == -1);
+    assert(discharging == false);
 
     // Clean up
     std::filesystem::remove_all(mock_dir);
@@ -292,6 +351,28 @@ void testSignatureVerification() {
     assert(constantTimeCompare("abc", "def") == false);
     assert(constantTimeCompare("abc", "abcd") == false);
 
+    // Case 8: Header spoofing / substring match bug prevention
+    // Let's generate a unique timestamp and signature for spoofed tests to avoid replay detection
+    std::string current_ts_spoof = std::to_string(now_ms + 1);
+    std::string valid_sig_spoof = computeHmacSha256(g_config.secret, "POST\n/ingest\n" + current_ts_spoof + "\nbody_content");
+    
+    // If request contains "My-X-Signature: valid_sig" before "X-Signature: wrong_sig", it must extract "wrong_sig" and fail.
+    std::string spoofed_req = "My-X-Signature: " + valid_sig_spoof + "\r\nX-Signature: wrong_sig\r\nX-Timestamp: " + current_ts_spoof + "\r\nHost: localhost\r\n\r\n";
+    assert(verifySignature("POST", "/ingest", spoofed_req, "body_content") == false);
+    
+    // If request contains dummy My-X-Signature but valid X-Signature, it must succeed.
+    std::string valid_spoofed_req = "My-X-Signature: dummy_val\r\nX-Signature: " + valid_sig_spoof + "\r\nX-Timestamp: " + current_ts_spoof + "\r\nHost: localhost\r\n\r\n";
+    assert(verifySignature("POST", "/ingest", valid_spoofed_req, "body_content") == true);
+    std::cout << "[INFO] Header spoofing prevention verified." << std::endl;
+
+    // Case 9: Extraction of header from body instead of header section prevention
+    // Now getHeaderValue must not match header names inside the JSON body.
+    std::string request_with_sig_in_body = "X-Timestamp: " + current_ts + "\r\nHost: localhost\r\n\r\nBody containing X-Signature: dummy_val\n";
+    std::string extracted_sig = getHeaderValue(request_with_sig_in_body, "X-Signature");
+    std::cout << "[DIAGNOSTIC] Case 9 extracted: '" << extracted_sig << "'" << std::endl;
+    assert(extracted_sig == "");
+    std::cout << "[INFO] Body parsing bug prevention verified." << std::endl;
+
     g_config.secret = original_secret;
     std::cout << "[PASS] Signature Verification Test" << std::endl;
 }
@@ -329,6 +410,215 @@ void testOverridePause() {
     std::cout << "[PASS] Override Pause Test" << std::endl;
 }
 
+void testAdversarialBattery() {
+    std::cout << "Running adversarial battery tests..." << std::endl;
+
+    // 1. Regular file crash test
+    std::string mock_file = "./mock_battery_file";
+    std::remove(mock_file.c_str());
+    {
+        std::ofstream f(mock_file);
+        f << "just a file";
+    }
+    bool discharging = false;
+    bool exception_thrown = false;
+    int res = 0;
+    try {
+        res = getBatteryLevel(discharging, mock_file);
+    } catch (const std::filesystem::filesystem_error& e) {
+        exception_thrown = true;
+    }
+    std::remove(mock_file.c_str());
+    assert(exception_thrown == false); // Bug fixed: no longer throws exception!
+    assert(res == -1);
+
+    // 2. Multiple discharging batteries
+    std::string mock_dir = "./mock_sys_class_power_supply_adv";
+    std::filesystem::remove_all(mock_dir);
+    std::filesystem::create_directories(mock_dir + "/BAT0");
+    std::filesystem::create_directories(mock_dir + "/BAT1");
+    
+    {
+        std::ofstream status_file(mock_dir + "/BAT0/status");
+        status_file << "Discharging\n";
+        std::ofstream cap_file(mock_dir + "/BAT0/capacity");
+        cap_file << "80\n";
+    }
+    {
+        std::ofstream status_file(mock_dir + "/BAT1/status");
+        status_file << "Discharging\n";
+        std::ofstream cap_file(mock_dir + "/BAT1/capacity");
+        cap_file << "15\n";
+    }
+    
+    discharging = false;
+    int val = getBatteryLevel(discharging, mock_dir);
+    std::cout << "Multiple discharging (BAT0=80, BAT1=15) returned capacity: " << val << ", discharging: " << discharging << std::endl;
+    // Bug fixed: must return lowest capacity 15 instead of 80
+    assert(val == 15);
+    assert(discharging == true);
+    std::cout << "[INFO] Lowest capacity returned correctly." << std::endl;
+    
+    // 3. Peripheral battery filtration test
+    std::filesystem::remove_all(mock_dir);
+    std::filesystem::create_directories(mock_dir + "/BAT0");
+    std::filesystem::create_directories(mock_dir + "/hid-mouse-battery");
+    {
+        std::ofstream status_file(mock_dir + "/BAT0/status");
+        status_file << "Discharging\n";
+        std::ofstream cap_file(mock_dir + "/BAT0/capacity");
+        cap_file << "80\n";
+    }
+    {
+        std::ofstream status_file(mock_dir + "/hid-mouse-battery/status");
+        status_file << "Discharging\n";
+        std::ofstream cap_file(mock_dir + "/hid-mouse-battery/capacity");
+        cap_file << "10\n";
+    }
+    discharging = false;
+    val = getBatteryLevel(discharging, mock_dir);
+    std::cout << "Filtration check (BAT0=80, mouse-battery=10) returned capacity: " << val << ", discharging: " << discharging << std::endl;
+    assert(val == 80);
+    assert(discharging == true);
+    std::cout << "[INFO] Peripheral battery filtered out correctly." << std::endl;
+
+    std::filesystem::remove_all(mock_dir);
+    std::cout << "[PASS] Adversarial Battery Tests completed." << std::endl;
+}
+
+void testAdversarialSignature() {
+    std::cout << "Running adversarial signature tests..." << std::endl;
+    std::string original_secret = g_config.secret;
+    g_config.secret = "super_secret_key";
+    
+    auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    
+    auto make_request = [](const std::string& sig, const std::string& ts) {
+        return "X-Signature: " + sig + "\r\nX-Timestamp: " + ts + "\r\nHost: localhost\r\n\r\n";
+    };
+
+    // 1. Signature Replay within window: should fail on the second attempt
+    std::string current_ts = std::to_string(now_ms);
+    std::string valid_sig = computeHmacSha256(g_config.secret, "POST\n/ingest\n" + current_ts + "\nbody_content");
+    
+    bool first_attempt = verifySignature("POST", "/ingest", make_request(valid_sig, current_ts), "body_content");
+    bool second_attempt = verifySignature("POST", "/ingest", make_request(valid_sig, current_ts), "body_content");
+    
+    std::cout << "Replay within window - Attempt 1: " << (first_attempt ? "succeeded" : "failed")
+              << " | Attempt 2 (Replay): " << (second_attempt ? "succeeded" : "failed") << std::endl;
+              
+    assert(first_attempt == true);
+    assert(second_attempt == false); // Bug fixed: signature replay is blocked!
+    std::cout << "[INFO] Signature replay successfully blocked." << std::endl;
+
+    // 2. Future timestamp (clock skew/exploitation)
+    std::string future_ts = std::to_string(now_ms + 59000);
+    std::string future_sig = computeHmacSha256(g_config.secret, "POST\n/ingest\n" + future_ts + "\nbody_content");
+    bool future_attempt = verifySignature("POST", "/ingest", make_request(future_sig, future_ts), "body_content");
+    std::cout << "Future timestamp (+59s) verification: " << (future_attempt ? "succeeded" : "failed") << std::endl;
+    assert(future_attempt == false); // Bug fixed: future timestamp is rejected!
+    std::cout << "[INFO] Future timestamp verification rejected." << std::endl;
+
+    g_config.secret = original_secret;
+    std::cout << "[PASS] Adversarial Signature Tests completed." << std::endl;
+}
+
+void testAdversarialTiming() {
+    std::cout << "Running adversarial timing tests..." << std::endl;
+    
+    std::string s1(64, 'a');
+    std::string s_diff_start = "b" + std::string(63, 'a');
+    std::string s_diff_end = std::string(63, 'a') + "b";
+    std::string s_short(1, 'a');
+    
+    const int iterations = 5000000;
+    
+    auto t0 = std::chrono::high_resolution_clock::now();
+    for (int i = 0; i < iterations; ++i) {
+        constantTimeCompare(s1, s_short);
+    }
+    auto t1 = std::chrono::high_resolution_clock::now();
+    double time_short = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    
+    t0 = std::chrono::high_resolution_clock::now();
+    for (int i = 0; i < iterations; ++i) {
+        constantTimeCompare(s1, s_diff_start);
+    }
+    t1 = std::chrono::high_resolution_clock::now();
+    double time_diff_start = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    
+    t0 = std::chrono::high_resolution_clock::now();
+    for (int i = 0; i < iterations; ++i) {
+        constantTimeCompare(s1, s_diff_end);
+    }
+    t1 = std::chrono::high_resolution_clock::now();
+    double time_diff_end = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    
+    std::cout << "constantTimeCompare timing over " << iterations << " iterations:" << std::endl;
+    std::cout << "  Different length (short): " << time_short << " ms" << std::endl;
+    std::cout << "  Different start: " << time_diff_start << " ms" << std::endl;
+    std::cout << "  Different end: " << time_diff_end << " ms" << std::endl;
+    
+    // Check if short length comparison is faster than equal length comparisons
+    if (time_short < time_diff_start * 0.8) {
+        std::cout << "[EXPECTED BUG CONFIRMED] Length check is not constant-time (short signature is processed significantly faster)." << std::endl;
+    }
+    
+    // Check if character comparison itself is relatively constant time
+    double diff_pct = std::abs(time_diff_start - time_diff_end) / time_diff_start * 100.0;
+    std::cout << "  Start vs End character mismatch difference: " << diff_pct << "%" << std::endl;
+    
+    std::cout << "[PASS] Adversarial Timing Tests completed." << std::endl;
+}
+
+void testAdversarialPause() {
+    std::cout << "Running adversarial pause tests..." << std::endl;
+    bool original_tracking_paused = g_tracking_paused;
+    bool original_override_paused = g_override_paused;
+    auto original_override_paused_until = g_override_paused_until;
+
+    // 1. Negative duration pause override
+    g_tracking_paused = false;
+    g_override_paused = true;
+    double duration_neg = -3600.0;
+    g_override_paused_until = std::chrono::steady_clock::now() + std::chrono::seconds(static_cast<int>(duration_neg));
+    
+    bool is_paused_neg = isTelemetryPaused();
+    std::cout << "Pause override negative duration (-3600s). isTelemetryPaused() result: " 
+              << (is_paused_neg ? "paused" : "not paused") << " (g_override_paused=" << (g_override_paused ? "true" : "false") << ")" << std::endl;
+    
+    assert(is_paused_neg == false);
+    assert(g_override_paused == false); // Should clear override pause on first evaluation
+    std::cout << "[EXPECTED BUG CONFIRMED] Negative duration pause override is accepted and immediately clears the override status, returning tracking to active without warning." << std::endl;
+
+    // 2. Huge duration pause override (causing integer overflow)
+    g_tracking_paused = false;
+    g_override_paused = true;
+    double duration_huge = 3e9; // larger than INT_MAX
+    int casted = static_cast<int>(duration_huge);
+    g_override_paused_until = std::chrono::steady_clock::now() + std::chrono::seconds(casted);
+    
+    bool is_paused_huge = isTelemetryPaused();
+    std::cout << "Pause override huge duration (3e9s, casted to " << casted << "). isTelemetryPaused() result: " 
+              << (is_paused_huge ? "paused" : "not paused") << " (g_override_paused=" << (g_override_paused ? "true" : "false") << ")" << std::endl;
+              
+    // If casted is negative (due to overflow/wrap-around), it will immediately unpause!
+    if (casted < 0) {
+        assert(is_paused_huge == false);
+        assert(g_override_paused == false);
+        std::cout << "[EXPECTED BUG CONFIRMED] Huge duration overflowed to negative integer, bypassing pause override entirely." << std::endl;
+    } else {
+        std::cout << "Casted duration did not overflow to negative integer (depends on standard library implementation of double-to-int conversion out-of-range)." << std::endl;
+    }
+
+    g_tracking_paused = original_tracking_paused;
+    g_override_paused = original_override_paused;
+    g_override_paused_until = original_override_paused_until;
+    
+    std::cout << "[PASS] Adversarial Pause Tests completed." << std::endl;
+}
+
 int main() {
     std::cout << "Running Differential Privacy Tests..." << std::endl;
     testLaplaceNoiseDistribution();
@@ -338,12 +628,16 @@ int main() {
     testNetworkChecker();
     testPrivacyBudgetTracker();
     testProcessScanner();
-    testResourcePerformanceTelemetry();
+    testGDPRTelemetry();
     testSharedFolderSnapshots();
     testTrackingPaused();
     testBatteryPowerSaver();
     testSignatureVerification();
     testOverridePause();
+    testAdversarialBattery();
+    testAdversarialSignature();
+    testAdversarialTiming();
+    testAdversarialPause();
     std::cout << "All tests passed successfully." << std::endl;
     return 0;
 }

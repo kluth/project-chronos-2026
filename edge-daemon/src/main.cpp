@@ -4,6 +4,7 @@
 #include <memory>
 #include <thread>
 #include <chrono>
+#include <cmath>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
@@ -12,35 +13,7 @@
 #include <gio/gio.h>
 #include "differential_privacy.h"
 
-// Helper to parse double safely
-bool parseDouble(const std::string& str, double& val) {
-    std::stringstream ss(str);
-    return (ss >> val) && ss.eof();
-}
 
-bool extractDouble(const std::string& json, const std::string& key, double& out_val) {
-    size_t key_pos = json.find("\"" + key + "\"");
-    if (key_pos == std::string::npos) return false;
-    
-    size_t colon_pos = json.find(":", key_pos);
-    if (colon_pos == std::string::npos) return false;
-    
-    size_t start = colon_pos + 1;
-    while (start < json.size() && (std::isspace(json[start]) || json[start] == '"')) {
-        start++;
-    }
-    
-    size_t end = start;
-    while (end < json.size() && (std::isdigit(json[end]) || json[end] == '.' || json[end] == '-' || json[end] == '+' || json[end] == 'e' || json[end] == 'E')) {
-        end++;
-    }
-    
-    if (end > start) {
-        std::string val_str = json.substr(start, end - start);
-        return parseDouble(val_str, out_val);
-    }
-    return false;
-}
 
 // DBus callbacks
 void on_prepare_for_sleep(GDBusConnection* connection,
@@ -52,9 +25,9 @@ void on_prepare_for_sleep(GDBusConnection* connection,
                           gpointer user_data) {
     gboolean active;
     g_variant_get(parameters, "(b)", &active);
-    g_tracking_paused = (active == TRUE);
+    g_dbus_paused = (active == TRUE);
     std::cout << "[DBus Listener] PrepareForSleep active: " << (active ? "true" : "false")
-              << " -> g_tracking_paused: " << (g_tracking_paused ? "true" : "false") << std::endl;
+              << " -> g_dbus_paused: " << (g_dbus_paused ? "true" : "false") << std::endl;
 }
 
 void on_session_lock(GDBusConnection* connection,
@@ -64,8 +37,8 @@ void on_session_lock(GDBusConnection* connection,
                      const gchar* signal_name,
                      GVariant* parameters,
                      gpointer user_data) {
-    g_tracking_paused = true;
-    std::cout << "[DBus Listener] Session Lock -> g_tracking_paused: true" << std::endl;
+    g_dbus_paused = true;
+    std::cout << "[DBus Listener] Session Lock -> g_dbus_paused: true" << std::endl;
 }
 
 void on_session_unlock(GDBusConnection* connection,
@@ -75,8 +48,8 @@ void on_session_unlock(GDBusConnection* connection,
                        const gchar* signal_name,
                        GVariant* parameters,
                        gpointer user_data) {
-    g_tracking_paused = false;
-    std::cout << "[DBus Listener] Session Unlock -> g_tracking_paused: false" << std::endl;
+    g_dbus_paused = false;
+    std::cout << "[DBus Listener] Session Unlock -> g_dbus_paused: false" << std::endl;
 }
 
 void on_screensaver_active_changed(GDBusConnection* connection,
@@ -88,9 +61,9 @@ void on_screensaver_active_changed(GDBusConnection* connection,
                                    gpointer user_data) {
     gboolean active;
     g_variant_get(parameters, "(b)", &active);
-    g_tracking_paused = (active == TRUE);
+    g_dbus_paused = (active == TRUE);
     std::cout << "[DBus Listener] Screensaver ActiveChanged active: " << (active ? "true" : "false")
-              << " -> g_tracking_paused: " << (g_tracking_paused ? "true" : "false") << std::endl;
+              << " -> g_dbus_paused: " << (g_dbus_paused ? "true" : "false") << std::endl;
 }
 
 void dbusListenerThread() {
@@ -198,10 +171,7 @@ void dbusListenerThread() {
 }
 
 void backgroundTelemetryThread(const std::string& db_path) {
-    std::cout << "[Background Monitor] Starting native process scanner and performance telemetry..." << std::endl;
-    
-    CpuStats prev_cpu;
-    bool has_cpu = readCpuStats(prev_cpu);
+    std::cout << "[Background Monitor] Starting native process scanner..." << std::endl;
     
     auto last_backup_time = std::chrono::steady_clock::now();
     const auto backup_interval = std::chrono::minutes(15);
@@ -218,13 +188,20 @@ void backgroundTelemetryThread(const std::string& db_path) {
                 TelemetryEvent cleaned_event = { cleaned_metric, raw_event.value };
                 
                 double cumulative = getCumulativeEpsilon24h(db_path);
-                double current_epsilon = g_config.epsilon;
+                double current_epsilon;
+                double config_budget;
+                {
+                    std::lock_guard<std::mutex> lock(g_config_mutex);
+                    current_epsilon = g_config.epsilon;
+                    config_budget = g_config.budget;
+                }
                 
-                if (g_config.budget > 0.0 && cumulative >= g_config.budget) {
-                    std::cout << "[Privacy Budget Check] Limit exceeded (" << cumulative << "/" << g_config.budget 
+                if (config_budget > 0.0 && cumulative >= config_budget) {
+                    std::cout << "[Privacy Budget Check] Limit exceeded (" << cumulative << "/" << config_budget 
                               << "). Skipping dev tool log for " << cleaned_event.metric_name << std::endl;
                     continue;
-                } else if (g_config.budget > 0.0 && cumulative >= 0.8 * g_config.budget) {
+                } else if (config_budget > 0.0 && cumulative >= 0.8 * config_budget) {
+                    std::lock_guard<std::mutex> lock(g_config_mutex);
                     current_epsilon = calculateAdjustedEpsilon(g_config.epsilon, g_config.budget, cumulative);
                     std::cout << "[Privacy Budget Check] Approaching limit (" << cumulative << "/" << g_config.budget 
                               << "). Adjusting epsilon to " << current_epsilon << std::endl;
@@ -241,74 +218,6 @@ void backgroundTelemetryThread(const std::string& db_path) {
                     }
                 } else {
                     bufferEvent(safe_event, db_path);
-                }
-            }
-        }
-        
-        // 2. Resource Telemetry (F44)
-        if (!isTelemetryPaused()) {
-            if (has_cpu) {
-                CpuStats curr_cpu;
-                if (readCpuStats(curr_cpu)) {
-                    double cpu_util = calculateCpuUtilization(prev_cpu, curr_cpu);
-                    prev_cpu = curr_cpu;
-                    
-                    TelemetryEvent raw_event = { "cpu_utilization", cpu_util };
-                    std::string cleaned_metric = obfuscateDomainOrCategory(raw_event.metric_name);
-                    TelemetryEvent cleaned_event = { cleaned_metric, raw_event.value };
-                    
-                    double cumulative = getCumulativeEpsilon24h(db_path);
-                    double current_epsilon = g_config.epsilon;
-                    
-                    if (g_config.budget > 0.0 && cumulative >= g_config.budget) {
-                        std::cout << "[Privacy Budget Check] Limit exceeded. Skipping CPU telemetry." << std::endl;
-                    } else {
-                        if (g_config.budget > 0.0 && cumulative >= 0.8 * g_config.budget) {
-                            current_epsilon = calculateAdjustedEpsilon(g_config.epsilon, g_config.budget, cumulative);
-                        }
-                        TelemetryEvent safe_event = anonymizeEvent(cleaned_event, current_epsilon);
-                        logPrivacyEpsilon(current_epsilon, db_path);
-                        
-                        if (isNetworkOnline()) {
-                            flushBuffer(db_path);
-                            if (!runCurlSafe(safe_event.metric_name, safe_event.value)) {
-                                bufferEvent(safe_event, db_path);
-                            }
-                        } else {
-                            bufferEvent(safe_event, db_path);
-                        }
-                    }
-                }
-            } else {
-                has_cpu = readCpuStats(prev_cpu);
-            }
-            
-            double ram_util = 0.0;
-            if (getRamUtilization(ram_util)) {
-                TelemetryEvent raw_event = { "ram_utilization", ram_util };
-                std::string cleaned_metric = obfuscateDomainOrCategory(raw_event.metric_name);
-                TelemetryEvent cleaned_event = { cleaned_metric, raw_event.value };
-                
-                double cumulative = getCumulativeEpsilon24h(db_path);
-                double current_epsilon = g_config.epsilon;
-                
-                if (g_config.budget > 0.0 && cumulative >= g_config.budget) {
-                    std::cout << "[Privacy Budget Check] Limit exceeded. Skipping RAM telemetry." << std::endl;
-                } else {
-                    if (g_config.budget > 0.0 && cumulative >= 0.8 * g_config.budget) {
-                        current_epsilon = calculateAdjustedEpsilon(g_config.epsilon, g_config.budget, cumulative);
-                    }
-                    TelemetryEvent safe_event = anonymizeEvent(cleaned_event, current_epsilon);
-                    logPrivacyEpsilon(current_epsilon, db_path);
-                    
-                    if (isNetworkOnline()) {
-                        flushBuffer(db_path);
-                        if (!runCurlSafe(safe_event.metric_name, safe_event.value)) {
-                            bufferEvent(safe_event, db_path);
-                        }
-                    } else {
-                        bufferEvent(safe_event, db_path);
-                    }
                 }
             }
         }
@@ -501,15 +410,23 @@ int main(int argc, char* argv[]) {
             int battery_pct = getBatteryLevel(discharging);
             
             bool current_pause_state = isTelemetryPaused();
+            double config_epsilon, config_sensitivity, config_budget;
+            {
+                std::lock_guard<std::mutex> lock(g_config_mutex);
+                config_epsilon = g_config.epsilon;
+                config_sensitivity = g_config.sensitivity;
+                config_budget = g_config.budget;
+            }
+            
             std::stringstream ss;
             ss << "HTTP/1.1 200 OK\r\n"
                << "Content-Type: application/json\r\n"
                << "Access-Control-Allow-Origin: *\r\n\r\n"
                << "{"
                << "\"paused\":" << (current_pause_state ? "true" : "false") << ","
-               << "\"epsilon\":" << g_config.epsilon << ","
-               << "\"sensitivity\":" << g_config.sensitivity << ","
-               << "\"budget\":" << g_config.budget << ","
+               << "\"epsilon\":" << config_epsilon << ","
+               << "\"sensitivity\":" << config_sensitivity << ","
+               << "\"budget\":" << config_budget << ","
                << "\"cumulative_epsilon\":" << cumulative << ","
                << "\"battery_level\":" << battery_pct << ","
                << "\"battery_discharging\":" << (discharging ? "true" : "false")
@@ -532,6 +449,8 @@ int main(int argc, char* argv[]) {
                     body = request;
                 }
             }
+
+            body = body.substr(0, content_length);
 
             if (!verifySignature(method, path, request, body)) {
                 std::string err_resp = "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n\r\n{\"error\":\"unauthorized\"}";
@@ -563,26 +482,44 @@ int main(int argc, char* argv[]) {
                 success = true;
             } else if (action == "resume") {
                 g_tracking_paused = false;
-                g_override_paused = false;
+                {
+                    std::lock_guard<std::mutex> lock(g_config_mutex);
+                    g_override_paused = false;
+                }
                 success = true;
             } else if (action == "pause_override") {
                 double duration = 3600.0;
                 extractDouble(body, "duration", duration);
-                g_override_paused = true;
-                g_override_paused_until = std::chrono::steady_clock::now() + std::chrono::seconds(static_cast<int>(duration));
+                
+                if (std::isnan(duration) || std::isinf(duration) || duration < 0.0 || duration > 31536000.0) {
+                    duration = 3600.0;
+                }
+                
+                {
+                    std::lock_guard<std::mutex> lock(g_config_mutex);
+                    g_override_paused = true;
+                    g_override_paused_until = std::chrono::steady_clock::now() + std::chrono::seconds(static_cast<int>(duration));
+                }
                 success = true;
             } else if (action == "configure") {
                 double new_epsilon;
-                if (extractDouble(body, "epsilon", new_epsilon)) {
-                    g_config.epsilon = new_epsilon;
-                }
+                bool has_eps = extractDouble(body, "epsilon", new_epsilon);
                 double new_budget;
-                if (extractDouble(body, "budget", new_budget)) {
-                    g_config.budget = new_budget;
-                }
+                bool has_bud = extractDouble(body, "budget", new_budget);
                 double new_sensitivity;
-                if (extractDouble(body, "sensitivity", new_sensitivity)) {
-                    g_config.sensitivity = new_sensitivity;
+                bool has_sens = extractDouble(body, "sensitivity", new_sensitivity);
+                
+                {
+                    std::lock_guard<std::mutex> lock(g_config_mutex);
+                    if (has_eps) {
+                        g_config.epsilon = new_epsilon;
+                    }
+                    if (has_bud) {
+                        g_config.budget = new_budget;
+                    }
+                    if (has_sens) {
+                        g_config.sensitivity = new_sensitivity;
+                    }
                 }
                 success = true;
             } else {
@@ -620,6 +557,8 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        body = body.substr(0, content_length);
+
         if (!verifySignature(method, path, request, body)) {
             std::string err_resp = "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n\r\n{\"error\":\"unauthorized\"}";
             send(new_socket, err_resp.c_str(), err_resp.length(), 0);
@@ -649,31 +588,32 @@ int main(int argc, char* argv[]) {
             continue;
         }
 
-        std::string active_window = "";
-        size_t pos = request.find("\"window\":\"");
-        if (pos != std::string::npos) {
-            size_t end_pos = request.find("\"", pos + 10);
-            if (end_pos != std::string::npos) {
-                active_window = request.substr(pos + 10, end_pos - (pos + 10));
-            }
-        }
+        double keystrokes_per_minute = 0.0;
+        bool has_keystrokes = extractDouble(body, "keystrokes_per_minute", keystrokes_per_minute);
 
-        if (!active_window.empty()) {
-            TelemetryEvent event = { active_window, 10.0 };
-            
-            // Clean/obfuscate title or URL before adding noise
+        double mouse_pixels_per_minute = 0.0;
+        bool has_mouse = extractDouble(body, "mouse_pixels_per_minute", mouse_pixels_per_minute);
+
+        auto process_event = [&](const std::string& name, double val) {
+            TelemetryEvent event = { name, val };
             std::string cleaned_metric = obfuscateDomainOrCategory(event.metric_name);
             TelemetryEvent cleaned_event = { cleaned_metric, event.value };
 
-            // Apply differential privacy with budget check (F39)
             double cumulative = getCumulativeEpsilon24h(DB_PATH);
-            double current_epsilon = g_config.epsilon;
+            double current_epsilon;
+            double config_budget;
+            {
+                std::lock_guard<std::mutex> lock(g_config_mutex);
+                current_epsilon = g_config.epsilon;
+                config_budget = g_config.budget;
+            }
             
-            if (g_config.budget > 0.0 && cumulative >= g_config.budget) {
-                std::cout << "[Privacy Budget Check] Limit exceeded (" << cumulative << "/" << g_config.budget 
+            if (config_budget > 0.0 && cumulative >= config_budget) {
+                std::cout << "[Privacy Budget Check] Limit exceeded (" << cumulative << "/" << config_budget 
                           << "). Ingestion paused for " << cleaned_event.metric_name << std::endl;
-                continue;
-            } else if (g_config.budget > 0.0 && cumulative >= 0.8 * g_config.budget) {
+                return;
+            } else if (config_budget > 0.0 && cumulative >= 0.8 * config_budget) {
+                std::lock_guard<std::mutex> lock(g_config_mutex);
                 current_epsilon = calculateAdjustedEpsilon(g_config.epsilon, g_config.budget, cumulative);
                 std::cout << "[Privacy Budget Check] Approaching limit (" << cumulative << "/" << g_config.budget 
                           << "). Adjusting epsilon to " << current_epsilon << std::endl;
@@ -683,15 +623,13 @@ int main(int argc, char* argv[]) {
             logPrivacyEpsilon(current_epsilon, DB_PATH);
             
             std::cout << "\n--- ChromeOS Host Ingestion Cycle ---" << std::endl;
-            std::cout << "Real Host Window: " << event.metric_name << " | Raw duration: " << event.value << "s" << std::endl;
+            std::cout << "Metric: " << event.metric_name << " | Raw value: " << event.value << std::endl;
             std::cout << "Cleaned/Obfuscated: " << safe_event.metric_name << std::endl;
-            std::cout << "Transmitting:     " << safe_event.metric_name << " | Anonymized: " << safe_event.value << "s" << std::endl;
+            std::cout << "Transmitting:     " << safe_event.metric_name << " | Anonymized: " << safe_event.value << std::endl;
             
             if (isNetworkOnline()) {
                 std::cout << "Network Status:   ONLINE" << std::endl;
-                // Flush SQLite buffer FIFO
                 flushBuffer(DB_PATH);
-                // Attempt to send current event
                 if (!runCurlSafe(safe_event.metric_name, safe_event.value)) {
                     std::cout << "Upload failed. Buffering event..." << std::endl;
                     bufferEvent(safe_event, DB_PATH);
@@ -702,6 +640,13 @@ int main(int argc, char* argv[]) {
                 std::cout << "Network Status:   OFFLINE | Buffering event..." << std::endl;
                 bufferEvent(safe_event, DB_PATH);
             }
+        };
+
+        if (has_keystrokes) {
+            process_event("keystrokes_per_minute", keystrokes_per_minute);
+        }
+        if (has_mouse) {
+            process_event("mouse_pixels_per_minute", mouse_pixels_per_minute);
         }
     }
     
