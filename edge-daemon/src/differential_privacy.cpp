@@ -736,7 +736,7 @@ bool dumpBackupToJson(const std::string& db_path) {
             }
             
             std::string val_str;
-            if (std::isnan(val) || std::isinf(val)) {
+            if (!std::isfinite(val)) {
                 val_str = "0.0";
             } else {
                 std::ostringstream vos;
@@ -769,7 +769,7 @@ bool dumpBackupToJson(const std::string& db_path) {
             long long ts = sqlite3_column_int64(stmt, 2);
             
             std::string eps_str;
-            if (std::isnan(eps) || std::isinf(eps)) {
+            if (!std::isfinite(eps)) {
                 eps_str = "0.0";
             } else {
                 std::ostringstream eoss;
