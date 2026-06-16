@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "Chronos ChromeOS Edge Tracker",
+  "version": "1.0",
+  "description": "Escapes the Crostini sandbox to read host ChromeOS active windows and streams them to the local C++ Daemon.",
+  "permissions": ["tabs", "idle"],
+  "host_permissions": ["http://localhost:8888/*"],
+  "background": {
+    "service_worker": "background.js"
+  }
+}

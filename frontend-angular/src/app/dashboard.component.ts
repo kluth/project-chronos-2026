@@ -113,36 +113,90 @@ export class DashboardComponent implements AfterViewInit, OnDestroy {
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
+    // Helper: Truncate text to fit within a specific pixel width
+    const truncate = (text: string, maxWidth: number) => {
+      if (ctx.measureText(text).width <= maxWidth) return text;
+      let truncated = text;
+      while (ctx.measureText(truncated + '...').width > maxWidth && truncated.length > 0) {
+        truncated = truncated.slice(0, -1);
+      }
+      return truncated + '...';
+    };
+
     // Clear canvas
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    // Draw background grid
-    ctx.strokeStyle = 'rgba(255,255,255,0.1)';
-    for(let i=0; i<canvas.width; i+=50) {
+    // Draw background grid & timeline
+    ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+    ctx.lineWidth = 1;
+    for(let i=0; i<=canvas.width; i+=100) {
       ctx.beginPath();
       ctx.moveTo(i, 0);
-      ctx.lineTo(i, canvas.height);
+      ctx.lineTo(i, canvas.height - 40);
       ctx.stroke();
+      
+      // Draw timeline labels
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+      ctx.font = '12px Inter';
+      const hour = (i / 100) + 9; // Let 0 = 9:00 AM
+      ctx.fillText(`${hour}:00`, i + 5, canvas.height - 15);
     }
 
     // Draw private anchors based on real data
-    ctx.fillStyle = 'rgba(233, 69, 96, 0.8)'; // Core theme color for anchors
     anchors.forEach((anchor, index) => {
-      // Very basic normalization of timestamps to canvas width (assuming a 24h window)
-      // For this implementation, we simulate mapping
-      const startX = (index * 150) + 50; 
-      const width = 100;
+      // Map logical start to X coordinate
+      const startX = anchor.start || (index * 200 + 50); 
+      const rawWidth = (anchor.end - anchor.start) || 150;
+      
+      // Enforce a strict minimum width so text never spills outside the boundaries
+      const padding = 15;
+      const visualWidth = Math.max(rawWidth, 190);
+      const maxTextWidth = visualWidth - (padding * 2);
+      
+      // Draw glow
+      ctx.shadowColor = '#e94560';
+      ctx.shadowBlur = 20;
       
       // Draw rounded rectangle for the anchor
+      ctx.fillStyle = 'rgba(233, 69, 96, 0.85)';
       ctx.beginPath();
-      ctx.roundRect(startX, 150, width, 100, 10);
+      ctx.roundRect(startX, 100, visualWidth, 130, 15);
       ctx.fill();
 
-      // Draw text
+      // Reset shadow for text to prevent blur on fonts
+      ctx.shadowBlur = 0;
+
+      // Draw title
       ctx.fillStyle = '#ffffff';
-      ctx.font = '14px Inter';
-      ctx.fillText(anchor['description']?.substring(0, 12) + '...', startX + 10, 200);
-      ctx.fillStyle = 'rgba(233, 69, 96, 0.8)';
+      ctx.font = 'bold 16px Inter';
+      const desc = anchor.description || 'Private Time';
+      ctx.fillText(truncate(desc, maxTextWidth), startX + padding, 135);
+
+      // Draw time details
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+      ctx.font = '13px Inter';
+      const startHour = Math.floor(anchor.start/100) + 9;
+      const endHour = Math.floor(anchor.end/100) + 9;
+      const eventDate = anchor.date || 'June 20, 2026';
+      const timeStr = `🕒 ${startHour}:00 - ${endHour}:00  📅 ${eventDate}`;
+      ctx.fillText(truncate(timeStr, maxTextWidth), startX + padding, 165);
+
+      // Draw place/type
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
+      ctx.font = '12px Inter';
+      const locStr = `📍 Location: Dorfwiese`;
+      ctx.fillText(truncate(locStr, maxTextWidth), startX + padding, 185);
+      
+      // Draw protection badge
+      const badgeWidth = 135;
+      ctx.fillStyle = 'rgba(0, 255, 100, 0.15)';
+      ctx.beginPath();
+      ctx.roundRect(startX + padding, 200, badgeWidth, 22, 8);
+      ctx.fill();
+      
+      ctx.fillStyle = '#00ff66';
+      ctx.font = 'bold 11px Inter';
+      ctx.fillText('✓ CRDT PROTECTED', startX + padding + 10, 215);
     });
 
     if (anchors.length === 0) {

@@ -45,7 +45,6 @@ export const onPrivateAnchorAdded = functions.region('europe-west3').firestore
 
         console.log(`[Chronos AI] Private anchor ${newAnchor.id} added. Enforcing boundaries...`);
 
-        // A new private anchor always wins. We must re-evaluate all existing work tasks.
         const anchorsSnap = await db.collection(`users/${userId}/private_anchors`).get();
         const anchors = anchorsSnap.docs.map(doc => doc.data() as PrivateLifeAnchor);
 
@@ -54,7 +53,6 @@ export const onPrivateAnchorAdded = functions.region('europe-west3').firestore
 
         const resolution = resolveSchedule(anchors, tasks);
 
-        // Find tasks that are no longer valid and delete/reschedule them
         const validTaskIds = new Set(resolution.validTasks.map(t => t.id));
         
         const batch = db.batch();
@@ -67,3 +65,53 @@ export const onPrivateAnchorAdded = functions.region('europe-west3').firestore
 
         await batch.commit();
     });
+
+// REST API for Edge Daemon Telemetry Ingestion
+export const ingestTelemetry = functions.region('europe-west3').https.onRequest(async (req, res) => {
+    if (req.method !== 'POST') {
+        res.status(405).send('Method Not Allowed');
+        return;
+    }
+    const data = req.body;
+    console.log(`[Edge Ingestion] Received anonymized telemetry:`, data);
+    
+    // Store telemetry in a time-series collection for the user
+    await db.collection('users/user_123/telemetry').add({
+        metric: data.metric,
+        value: data.val,
+        timestamp: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    res.status(200).send({ success: true });
+});
+
+// REST API to instantly seed the database and test the CRDT overlap
+export const seedDatabase = functions.region('europe-west3').https.onRequest(async (req, res) => {
+    const userId = "user_123";
+    
+    // 1. Add a Private Anchor (Family Festival)
+    const anchorRef = db.collection(`users/${userId}/private_anchors`).doc('family_fest');
+    await anchorRef.set({
+        id: 'family_fest',
+        type: 'PRIVATE',
+        description: 'Family Festival at Dorfwiese',
+        start: 100, // Normalized logical time start
+        end: 300    // Normalized logical time end
+    });
+
+    // 2. Add an overlapping Work Task (Jira sync)
+    const workRef = db.collection(`users/${userId}/work_tasks`).doc('jira_sync');
+    await workRef.set({
+        id: 'jira_sync',
+        type: 'WORK',
+        jiraId: 'PROJ-123',
+        start: 200, // Overlaps with the festival!
+        end: 250
+    });
+
+    res.status(200).send({ 
+        message: 'Database seeded! Check the Firebase Functions logs to see the WorkTask get automatically deleted by the CRDT logic.',
+        frontend: 'Check https://project-chronos-2026.web.app to see the Canvas updated!'
+    });
+});
+
