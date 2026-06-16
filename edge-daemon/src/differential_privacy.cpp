@@ -34,6 +34,7 @@
 
 // Define global configuration
 DPConfig g_config;
+std::atomic<bool> g_tracking_paused(false);
 
 double generateLaplaceNoise(double sensitivity, double epsilon) {
     // scale (b) = sensitivity / epsilon

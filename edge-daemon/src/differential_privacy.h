@@ -1,6 +1,9 @@
 #pragma once
 #include <string>
 #include <vector>
+#include <atomic>
+
+extern std::atomic<bool> g_tracking_paused;
 
 struct TelemetryEvent {
     std::string metric_name;

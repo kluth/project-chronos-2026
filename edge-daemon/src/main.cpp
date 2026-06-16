@@ -9,12 +9,192 @@
 #include <unistd.h>
 #include <cstring>
 #include <sstream>
+#include <gio/gio.h>
 #include "differential_privacy.h"
 
 // Helper to parse double safely
 bool parseDouble(const std::string& str, double& val) {
     std::stringstream ss(str);
     return (ss >> val) && ss.eof();
+}
+
+bool extractDouble(const std::string& json, const std::string& key, double& out_val) {
+    size_t key_pos = json.find("\"" + key + "\"");
+    if (key_pos == std::string::npos) return false;
+    
+    size_t colon_pos = json.find(":", key_pos);
+    if (colon_pos == std::string::npos) return false;
+    
+    size_t start = colon_pos + 1;
+    while (start < json.size() && (std::isspace(json[start]) || json[start] == '"')) {
+        start++;
+    }
+    
+    size_t end = start;
+    while (end < json.size() && (std::isdigit(json[end]) || json[end] == '.' || json[end] == '-' || json[end] == '+' || json[end] == 'e' || json[end] == 'E')) {
+        end++;
+    }
+    
+    if (end > start) {
+        std::string val_str = json.substr(start, end - start);
+        return parseDouble(val_str, out_val);
+    }
+    return false;
+}
+
+// DBus callbacks
+void on_prepare_for_sleep(GDBusConnection* connection,
+                          const gchar* sender_name,
+                          const gchar* object_path,
+                          const gchar* interface_name,
+                          const gchar* signal_name,
+                          GVariant* parameters,
+                          gpointer user_data) {
+    gboolean active;
+    g_variant_get(parameters, "(b)", &active);
+    g_tracking_paused = (active == TRUE);
+    std::cout << "[DBus Listener] PrepareForSleep active: " << (active ? "true" : "false")
+              << " -> g_tracking_paused: " << (g_tracking_paused ? "true" : "false") << std::endl;
+}
+
+void on_session_lock(GDBusConnection* connection,
+                     const gchar* sender_name,
+                     const gchar* object_path,
+                     const gchar* interface_name,
+                     const gchar* signal_name,
+                     GVariant* parameters,
+                     gpointer user_data) {
+    g_tracking_paused = true;
+    std::cout << "[DBus Listener] Session Lock -> g_tracking_paused: true" << std::endl;
+}
+
+void on_session_unlock(GDBusConnection* connection,
+                       const gchar* sender_name,
+                       const gchar* object_path,
+                       const gchar* interface_name,
+                       const gchar* signal_name,
+                       GVariant* parameters,
+                       gpointer user_data) {
+    g_tracking_paused = false;
+    std::cout << "[DBus Listener] Session Unlock -> g_tracking_paused: false" << std::endl;
+}
+
+void on_screensaver_active_changed(GDBusConnection* connection,
+                                   const gchar* sender_name,
+                                   const gchar* object_path,
+                                   const gchar* interface_name,
+                                   const gchar* signal_name,
+                                   GVariant* parameters,
+                                   gpointer user_data) {
+    gboolean active;
+    g_variant_get(parameters, "(b)", &active);
+    g_tracking_paused = (active == TRUE);
+    std::cout << "[DBus Listener] Screensaver ActiveChanged active: " << (active ? "true" : "false")
+              << " -> g_tracking_paused: " << (g_tracking_paused ? "true" : "false") << std::endl;
+}
+
+void dbusListenerThread() {
+    GMainContext* context = g_main_context_new();
+    g_main_context_push_thread_default(context);
+
+    GError* error = nullptr;
+    GDBusConnection* system_conn = g_bus_get_sync(G_BUS_TYPE_SYSTEM, nullptr, &error);
+    if (!system_conn) {
+        std::cerr << "[DBus Listener] Failed to connect to System Bus: " 
+                  << (error ? error->message : "unknown error") << std::endl;
+        if (error) g_error_free(error);
+        error = nullptr;
+    } else {
+        std::cout << "[DBus Listener] Connected to System Bus." << std::endl;
+        
+        g_dbus_connection_signal_subscribe(
+            system_conn,
+            "org.freedesktop.login1",
+            "org.freedesktop.login1.Manager",
+            "PrepareForSleep",
+            "/org/freedesktop/login1",
+            nullptr,
+            G_DBUS_SIGNAL_FLAGS_NONE,
+            on_prepare_for_sleep,
+            nullptr,
+            nullptr
+        );
+
+        g_dbus_connection_signal_subscribe(
+            system_conn,
+            "org.freedesktop.login1",
+            "org.freedesktop.login1.Session",
+            "Lock",
+            nullptr,
+            nullptr,
+            G_DBUS_SIGNAL_FLAGS_NONE,
+            on_session_lock,
+            nullptr,
+            nullptr
+        );
+
+        g_dbus_connection_signal_subscribe(
+            system_conn,
+            "org.freedesktop.login1",
+            "org.freedesktop.login1.Session",
+            "Unlock",
+            nullptr,
+            nullptr,
+            G_DBUS_SIGNAL_FLAGS_NONE,
+            on_session_unlock,
+            nullptr,
+            nullptr
+        );
+    }
+
+    GDBusConnection* session_conn = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, &error);
+    if (!session_conn) {
+        std::cerr << "[DBus Listener] Failed to connect to Session Bus: "
+                  << (error ? error->message : "unknown error") << std::endl;
+        if (error) g_error_free(error);
+    } else {
+        std::cout << "[DBus Listener] Connected to Session Bus." << std::endl;
+
+        g_dbus_connection_signal_subscribe(
+            session_conn,
+            nullptr,
+            "org.freedesktop.ScreenSaver",
+            "ActiveChanged",
+            nullptr,
+            nullptr,
+            G_DBUS_SIGNAL_FLAGS_NONE,
+            on_screensaver_active_changed,
+            nullptr,
+            nullptr
+        );
+
+        g_dbus_connection_signal_subscribe(
+            session_conn,
+            nullptr,
+            "org.gnome.ScreenSaver",
+            "ActiveChanged",
+            nullptr,
+            nullptr,
+            G_DBUS_SIGNAL_FLAGS_NONE,
+            on_screensaver_active_changed,
+            nullptr,
+            nullptr
+        );
+    }
+
+    if (system_conn || session_conn) {
+        GMainLoop* loop = g_main_loop_new(context, FALSE);
+        std::cout << "[DBus Listener] Starting DBus listener loop..." << std::endl;
+        g_main_loop_run(loop);
+        g_main_loop_unref(loop);
+    } else {
+        std::cerr << "[DBus Listener] Both System and Session DBus connections failed. DBus listener thread exiting." << std::endl;
+    }
+
+    if (system_conn) g_object_unref(system_conn);
+    if (session_conn) g_object_unref(session_conn);
+    g_main_context_pop_thread_default(context);
+    g_main_context_unref(context);
 }
 
 void backgroundTelemetryThread(const std::string& db_path) {
@@ -30,47 +210,10 @@ void backgroundTelemetryThread(const std::string& db_path) {
         std::this_thread::sleep_for(std::chrono::seconds(10));
         
         // 1. Process Scanning (F37)
-        auto active_tools = scanNativeProcesses();
-        for (const auto& tool : active_tools) {
-            TelemetryEvent raw_event = { "dev_tool_" + tool, 10.0 };
-            std::string cleaned_metric = obfuscateDomainOrCategory(raw_event.metric_name);
-            TelemetryEvent cleaned_event = { cleaned_metric, raw_event.value };
-            
-            double cumulative = getCumulativeEpsilon24h(db_path);
-            double current_epsilon = g_config.epsilon;
-            
-            if (g_config.budget > 0.0 && cumulative >= g_config.budget) {
-                std::cout << "[Privacy Budget Check] Limit exceeded (" << cumulative << "/" << g_config.budget 
-                          << "). Skipping dev tool log for " << cleaned_event.metric_name << std::endl;
-                continue;
-            } else if (g_config.budget > 0.0 && cumulative >= 0.8 * g_config.budget) {
-                current_epsilon = calculateAdjustedEpsilon(g_config.epsilon, g_config.budget, cumulative);
-                std::cout << "[Privacy Budget Check] Approaching limit (" << cumulative << "/" << g_config.budget 
-                          << "). Adjusting epsilon to " << current_epsilon << std::endl;
-            }
-            
-            TelemetryEvent safe_event = anonymizeEvent(cleaned_event, current_epsilon);
-            logPrivacyEpsilon(current_epsilon, db_path);
-            
-            std::cout << "[Background Scanner] Found active process: " << tool << ". Buffering/transmitting..." << std::endl;
-            if (isNetworkOnline()) {
-                flushBuffer(db_path);
-                if (!runCurlSafe(safe_event.metric_name, safe_event.value)) {
-                    bufferEvent(safe_event, db_path);
-                }
-            } else {
-                bufferEvent(safe_event, db_path);
-            }
-        }
-        
-        // 2. Resource Telemetry (F44)
-        if (has_cpu) {
-            CpuStats curr_cpu;
-            if (readCpuStats(curr_cpu)) {
-                double cpu_util = calculateCpuUtilization(prev_cpu, curr_cpu);
-                prev_cpu = curr_cpu;
-                
-                TelemetryEvent raw_event = { "cpu_utilization", cpu_util };
+        if (!g_tracking_paused) {
+            auto active_tools = scanNativeProcesses();
+            for (const auto& tool : active_tools) {
+                TelemetryEvent raw_event = { "dev_tool_" + tool, 10.0 };
                 std::string cleaned_metric = obfuscateDomainOrCategory(raw_event.metric_name);
                 TelemetryEvent cleaned_event = { cleaned_metric, raw_event.value };
                 
@@ -78,7 +221,79 @@ void backgroundTelemetryThread(const std::string& db_path) {
                 double current_epsilon = g_config.epsilon;
                 
                 if (g_config.budget > 0.0 && cumulative >= g_config.budget) {
-                    std::cout << "[Privacy Budget Check] Limit exceeded. Skipping CPU telemetry." << std::endl;
+                    std::cout << "[Privacy Budget Check] Limit exceeded (" << cumulative << "/" << g_config.budget 
+                              << "). Skipping dev tool log for " << cleaned_event.metric_name << std::endl;
+                    continue;
+                } else if (g_config.budget > 0.0 && cumulative >= 0.8 * g_config.budget) {
+                    current_epsilon = calculateAdjustedEpsilon(g_config.epsilon, g_config.budget, cumulative);
+                    std::cout << "[Privacy Budget Check] Approaching limit (" << cumulative << "/" << g_config.budget 
+                              << "). Adjusting epsilon to " << current_epsilon << std::endl;
+                }
+                
+                TelemetryEvent safe_event = anonymizeEvent(cleaned_event, current_epsilon);
+                logPrivacyEpsilon(current_epsilon, db_path);
+                
+                std::cout << "[Background Scanner] Found active process: " << tool << ". Buffering/transmitting..." << std::endl;
+                if (isNetworkOnline()) {
+                    flushBuffer(db_path);
+                    if (!runCurlSafe(safe_event.metric_name, safe_event.value)) {
+                        bufferEvent(safe_event, db_path);
+                    }
+                } else {
+                    bufferEvent(safe_event, db_path);
+                }
+            }
+        }
+        
+        // 2. Resource Telemetry (F44)
+        if (!g_tracking_paused) {
+            if (has_cpu) {
+                CpuStats curr_cpu;
+                if (readCpuStats(curr_cpu)) {
+                    double cpu_util = calculateCpuUtilization(prev_cpu, curr_cpu);
+                    prev_cpu = curr_cpu;
+                    
+                    TelemetryEvent raw_event = { "cpu_utilization", cpu_util };
+                    std::string cleaned_metric = obfuscateDomainOrCategory(raw_event.metric_name);
+                    TelemetryEvent cleaned_event = { cleaned_metric, raw_event.value };
+                    
+                    double cumulative = getCumulativeEpsilon24h(db_path);
+                    double current_epsilon = g_config.epsilon;
+                    
+                    if (g_config.budget > 0.0 && cumulative >= g_config.budget) {
+                        std::cout << "[Privacy Budget Check] Limit exceeded. Skipping CPU telemetry." << std::endl;
+                    } else {
+                        if (g_config.budget > 0.0 && cumulative >= 0.8 * g_config.budget) {
+                            current_epsilon = calculateAdjustedEpsilon(g_config.epsilon, g_config.budget, cumulative);
+                        }
+                        TelemetryEvent safe_event = anonymizeEvent(cleaned_event, current_epsilon);
+                        logPrivacyEpsilon(current_epsilon, db_path);
+                        
+                        if (isNetworkOnline()) {
+                            flushBuffer(db_path);
+                            if (!runCurlSafe(safe_event.metric_name, safe_event.value)) {
+                                bufferEvent(safe_event, db_path);
+                            }
+                        } else {
+                            bufferEvent(safe_event, db_path);
+                        }
+                    }
+                }
+            } else {
+                has_cpu = readCpuStats(prev_cpu);
+            }
+            
+            double ram_util = 0.0;
+            if (getRamUtilization(ram_util)) {
+                TelemetryEvent raw_event = { "ram_utilization", ram_util };
+                std::string cleaned_metric = obfuscateDomainOrCategory(raw_event.metric_name);
+                TelemetryEvent cleaned_event = { cleaned_metric, raw_event.value };
+                
+                double cumulative = getCumulativeEpsilon24h(db_path);
+                double current_epsilon = g_config.epsilon;
+                
+                if (g_config.budget > 0.0 && cumulative >= g_config.budget) {
+                    std::cout << "[Privacy Budget Check] Limit exceeded. Skipping RAM telemetry." << std::endl;
                 } else {
                     if (g_config.budget > 0.0 && cumulative >= 0.8 * g_config.budget) {
                         current_epsilon = calculateAdjustedEpsilon(g_config.epsilon, g_config.budget, cumulative);
@@ -94,37 +309,6 @@ void backgroundTelemetryThread(const std::string& db_path) {
                     } else {
                         bufferEvent(safe_event, db_path);
                     }
-                }
-            }
-        } else {
-            has_cpu = readCpuStats(prev_cpu);
-        }
-        
-        double ram_util = 0.0;
-        if (getRamUtilization(ram_util)) {
-            TelemetryEvent raw_event = { "ram_utilization", ram_util };
-            std::string cleaned_metric = obfuscateDomainOrCategory(raw_event.metric_name);
-            TelemetryEvent cleaned_event = { cleaned_metric, raw_event.value };
-            
-            double cumulative = getCumulativeEpsilon24h(db_path);
-            double current_epsilon = g_config.epsilon;
-            
-            if (g_config.budget > 0.0 && cumulative >= g_config.budget) {
-                std::cout << "[Privacy Budget Check] Limit exceeded. Skipping RAM telemetry." << std::endl;
-            } else {
-                if (g_config.budget > 0.0 && cumulative >= 0.8 * g_config.budget) {
-                    current_epsilon = calculateAdjustedEpsilon(g_config.epsilon, g_config.budget, cumulative);
-                }
-                TelemetryEvent safe_event = anonymizeEvent(cleaned_event, current_epsilon);
-                logPrivacyEpsilon(current_epsilon, db_path);
-                
-                if (isNetworkOnline()) {
-                    flushBuffer(db_path);
-                    if (!runCurlSafe(safe_event.metric_name, safe_event.value)) {
-                        bufferEvent(safe_event, db_path);
-                    }
-                } else {
-                    bufferEvent(safe_event, db_path);
                 }
             }
         }
@@ -220,6 +404,9 @@ int main(int argc, char* argv[]) {
     std::thread bg_thread(backgroundTelemetryThread, DB_PATH);
     bg_thread.detach();
 
+    std::thread dbus_thread(dbusListenerThread);
+    dbus_thread.detach();
+
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
     int opt = 1;
     setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt));
@@ -241,13 +428,167 @@ int main(int argc, char* argv[]) {
         int new_socket = accept(server_fd, nullptr, nullptr);
         if (new_socket < 0) continue;
 
-        char buffer[2048] = {0};
-        read(new_socket, buffer, 2048);
-        std::string request(buffer);
+        std::string request = "";
+        char buffer[1024];
+        ssize_t bytes_read;
+        size_t content_length = 0;
+        size_t header_end = std::string::npos;
+
+        while (true) {
+            bytes_read = recv(new_socket, buffer, sizeof(buffer) - 1, 0);
+            if (bytes_read <= 0) {
+                break;
+            }
+            buffer[bytes_read] = '\0';
+            request.append(buffer, bytes_read);
+
+            if (header_end == std::string::npos) {
+                header_end = request.find("\r\n\r\n");
+                if (header_end == std::string::npos) {
+                    header_end = request.find("\n\n");
+                }
+                
+                if (header_end != std::string::npos) {
+                    size_t cl_pos = request.find("Content-Length:");
+                    if (cl_pos == std::string::npos) {
+                        cl_pos = request.find("content-length:");
+                    }
+                    if (cl_pos != std::string::npos && cl_pos < header_end) {
+                        size_t end_line = request.find("\n", cl_pos);
+                        std::string cl_line = request.substr(cl_pos, end_line - cl_pos);
+                        size_t colon = cl_line.find(":");
+                        if (colon != std::string::npos) {
+                            std::string cl_val = cl_line.substr(colon + 1);
+                            size_t first = cl_val.find_first_not_of(" \r\n");
+                            size_t last = cl_val.find_last_not_of(" \r\n");
+                            if (first != std::string::npos && last != std::string::npos) {
+                                std::stringstream cl_ss(cl_val.substr(first, last - first + 1));
+                                cl_ss >> content_length;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (header_end != std::string::npos) {
+                size_t body_start = header_end + (request.find("\r\n\r\n") != std::string::npos ? 4 : 2);
+                if (request.size() - body_start >= content_length) {
+                    break;
+                }
+            }
+        }
+        std::cout << "[Edge Daemon Server] Received request:\n" << request << std::endl;
+
+        std::string method, path;
+        std::istringstream iss(request);
+        iss >> method >> path;
+        std::cout << "[Edge Daemon Server] Method: '" << method << "', Path: '" << path << "'" << std::endl;
+
+        if (method.empty() || path.empty()) {
+            close(new_socket);
+            continue;
+        }
+
+        if (method == "GET" && path == "/status") {
+            double cumulative = getCumulativeEpsilon24h(DB_PATH);
+            std::stringstream ss;
+            ss << "HTTP/1.1 200 OK\r\n"
+               << "Content-Type: application/json\r\n"
+               << "Access-Control-Allow-Origin: *\r\n\r\n"
+               << "{"
+               << "\"paused\":" << (g_tracking_paused ? "true" : "false") << ","
+               << "\"epsilon\":" << g_config.epsilon << ","
+               << "\"sensitivity\":" << g_config.sensitivity << ","
+               << "\"budget\":" << g_config.budget << ","
+               << "\"cumulative_epsilon\":" << cumulative
+               << "}";
+            std::string response = ss.str();
+            send(new_socket, response.c_str(), response.length(), 0);
+            close(new_socket);
+            continue;
+        } 
+        else if (method == "POST" && path == "/control") {
+            size_t body_pos = request.find("\r\n\r\n");
+            std::string body;
+            if (body_pos != std::string::npos) {
+                body = request.substr(body_pos + 4);
+            } else {
+                body_pos = request.find("\n\n");
+                if (body_pos != std::string::npos) {
+                    body = request.substr(body_pos + 2);
+                } else {
+                    body = request;
+                }
+            }
+
+            std::string action = "";
+            size_t act_pos = body.find("\"action\"");
+            if (act_pos != std::string::npos) {
+                size_t colon_pos = body.find(":", act_pos);
+                if (colon_pos != std::string::npos) {
+                    size_t start_quote = body.find("\"", colon_pos);
+                    if (start_quote != std::string::npos) {
+                        size_t end_quote = body.find("\"", start_quote + 1);
+                        if (end_quote != std::string::npos) {
+                            action = body.substr(start_quote + 1, end_quote - start_quote - 1);
+                        }
+                    }
+                }
+            }
+
+            bool success = false;
+            std::string err_msg = "";
+
+            if (action == "pause") {
+                g_tracking_paused = true;
+                success = true;
+            } else if (action == "resume") {
+                g_tracking_paused = false;
+                success = true;
+            } else if (action == "configure") {
+                double new_epsilon;
+                if (extractDouble(body, "epsilon", new_epsilon)) {
+                    g_config.epsilon = new_epsilon;
+                }
+                double new_budget;
+                if (extractDouble(body, "budget", new_budget)) {
+                    g_config.budget = new_budget;
+                }
+                double new_sensitivity;
+                if (extractDouble(body, "sensitivity", new_sensitivity)) {
+                    g_config.sensitivity = new_sensitivity;
+                }
+                success = true;
+            } else {
+                err_msg = "Invalid action: " + action;
+            }
+
+            std::stringstream ss;
+            if (success) {
+                ss << "HTTP/1.1 200 OK\r\n"
+                   << "Content-Type: application/json\r\n"
+                   << "Access-Control-Allow-Origin: *\r\n\r\n"
+                   << "{\"status\":\"ok\"}";
+            } else {
+                ss << "HTTP/1.1 400 Bad Request\r\n"
+                   << "Content-Type: application/json\r\n"
+                   << "Access-Control-Allow-Origin: *\r\n\r\n"
+                   << "{\"status\":\"error\",\"message\":\"" << err_msg << "\"}";
+            }
+            std::string response = ss.str();
+            send(new_socket, response.c_str(), response.length(), 0);
+            close(new_socket);
+            continue;
+        }
 
         std::string response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n\r\n{\"status\":\"ok\"}";
         send(new_socket, response.c_str(), response.length(), 0);
         close(new_socket);
+
+        if (g_tracking_paused) {
+            std::cout << "[Edge Daemon] Ingestion paused. Ignoring telemetry point." << std::endl;
+            continue;
+        }
 
         std::string active_window = "";
         size_t pos = request.find("\"window\":\"");
