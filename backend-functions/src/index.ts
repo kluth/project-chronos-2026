@@ -6,7 +6,7 @@ admin.initializeApp();
 const db = admin.firestore();
 
 // Managed Agent: Conflict-Free Resolution Trigger
-export const onWorkTaskAdded = functions.firestore
+export const onWorkTaskAdded = functions.region('europe-west3').firestore
     .document('users/{userId}/work_tasks/{taskId}')
     .onCreate(async (snap, context) => {
         const userId = context.params.userId;
@@ -37,7 +37,7 @@ export const onWorkTaskAdded = functions.firestore
         }
     });
 
-export const onPrivateAnchorAdded = functions.firestore
+export const onPrivateAnchorAdded = functions.region('europe-west3').firestore
     .document('users/{userId}/private_anchors/{anchorId}')
     .onCreate(async (snap, context) => {
         const userId = context.params.userId;

@@ -7,7 +7,7 @@ const crdt_1 = require("./crdt");
 admin.initializeApp();
 const db = admin.firestore();
 // Managed Agent: Conflict-Free Resolution Trigger
-exports.onWorkTaskAdded = functions.firestore
+exports.onWorkTaskAdded = functions.region('europe-west3').firestore
     .document('users/{userId}/work_tasks/{taskId}')
     .onCreate(async (snap, context) => {
     const userId = context.params.userId;
@@ -32,7 +32,7 @@ exports.onWorkTaskAdded = functions.firestore
         console.log(`[Chronos AI] WorkTask ${newTask.id} safely scheduled in a valid TimeGap.`);
     }
 });
-exports.onPrivateAnchorAdded = functions.firestore
+exports.onPrivateAnchorAdded = functions.region('europe-west3').firestore
     .document('users/{userId}/private_anchors/{anchorId}')
     .onCreate(async (snap, context) => {
     const userId = context.params.userId;
