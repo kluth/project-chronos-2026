@@ -425,7 +425,11 @@ bool bufferEvent(const TelemetryEvent& event, const std::string& db_path) {
     }
 
     sqlite3_bind_text(stmt, 1, event.metric_name.c_str(), -1, SQLITE_TRANSIENT);
-    double safe_value = std::isnan(event.value) || std::isinf(event.value) ? 0.0 : event.value;
+    double safe_value = event.value;
+    if (!std::isfinite(event.value)) {
+        std::cerr << "[Warning] bufferEvent: event value is not finite (" << event.value << ") for metric " << event.metric_name << ". Clamping to 0.0." << std::endl;
+        safe_value = 0.0;
+    }
     sqlite3_bind_double(stmt, 2, safe_value);
     sqlite3_bind_int64(stmt, 3, std::time(nullptr));
 
