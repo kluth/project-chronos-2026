@@ -210,7 +210,7 @@ void backgroundTelemetryThread(const std::string& db_path) {
         std::this_thread::sleep_for(std::chrono::seconds(10));
         
         // 1. Process Scanning (F37)
-        if (!g_tracking_paused) {
+        if (!isTelemetryPaused()) {
             auto active_tools = scanNativeProcesses();
             for (const auto& tool : active_tools) {
                 TelemetryEvent raw_event = { "dev_tool_" + tool, 10.0 };
@@ -246,7 +246,7 @@ void backgroundTelemetryThread(const std::string& db_path) {
         }
         
         // 2. Resource Telemetry (F44)
-        if (!g_tracking_paused) {
+        if (!isTelemetryPaused()) {
             if (has_cpu) {
                 CpuStats curr_cpu;
                 if (readCpuStats(curr_cpu)) {
@@ -490,17 +490,29 @@ int main(int argc, char* argv[]) {
         }
 
         if (method == "GET" && path == "/status") {
+            if (!verifySignature(method, path, request, "")) {
+                std::string err_resp = "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n\r\n{\"error\":\"unauthorized\"}";
+                send(new_socket, err_resp.c_str(), err_resp.length(), 0);
+                close(new_socket);
+                continue;
+            }
             double cumulative = getCumulativeEpsilon24h(DB_PATH);
+            bool discharging = false;
+            int battery_pct = getBatteryLevel(discharging);
+            
+            bool current_pause_state = isTelemetryPaused();
             std::stringstream ss;
             ss << "HTTP/1.1 200 OK\r\n"
                << "Content-Type: application/json\r\n"
                << "Access-Control-Allow-Origin: *\r\n\r\n"
                << "{"
-               << "\"paused\":" << (g_tracking_paused ? "true" : "false") << ","
+               << "\"paused\":" << (current_pause_state ? "true" : "false") << ","
                << "\"epsilon\":" << g_config.epsilon << ","
                << "\"sensitivity\":" << g_config.sensitivity << ","
                << "\"budget\":" << g_config.budget << ","
-               << "\"cumulative_epsilon\":" << cumulative
+               << "\"cumulative_epsilon\":" << cumulative << ","
+               << "\"battery_level\":" << battery_pct << ","
+               << "\"battery_discharging\":" << (discharging ? "true" : "false")
                << "}";
             std::string response = ss.str();
             send(new_socket, response.c_str(), response.length(), 0);
@@ -519,6 +531,13 @@ int main(int argc, char* argv[]) {
                 } else {
                     body = request;
                 }
+            }
+
+            if (!verifySignature(method, path, request, body)) {
+                std::string err_resp = "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n\r\n{\"error\":\"unauthorized\"}";
+                send(new_socket, err_resp.c_str(), err_resp.length(), 0);
+                close(new_socket);
+                continue;
             }
 
             std::string action = "";
@@ -544,6 +563,13 @@ int main(int argc, char* argv[]) {
                 success = true;
             } else if (action == "resume") {
                 g_tracking_paused = false;
+                g_override_paused = false;
+                success = true;
+            } else if (action == "pause_override") {
+                double duration = 3600.0;
+                extractDouble(body, "duration", duration);
+                g_override_paused = true;
+                g_override_paused_until = std::chrono::steady_clock::now() + std::chrono::seconds(static_cast<int>(duration));
                 success = true;
             } else if (action == "configure") {
                 double new_epsilon;
@@ -581,11 +607,44 @@ int main(int argc, char* argv[]) {
             continue;
         }
 
-        std::string response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n\r\n{\"status\":\"ok\"}";
+        size_t body_pos = request.find("\r\n\r\n");
+        std::string body;
+        if (body_pos != std::string::npos) {
+            body = request.substr(body_pos + 4);
+        } else {
+            body_pos = request.find("\n\n");
+            if (body_pos != std::string::npos) {
+                body = request.substr(body_pos + 2);
+            } else {
+                body = request;
+            }
+        }
+
+        if (!verifySignature(method, path, request, body)) {
+            std::string err_resp = "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n\r\n{\"error\":\"unauthorized\"}";
+            send(new_socket, err_resp.c_str(), err_resp.length(), 0);
+            close(new_socket);
+            continue;
+        }
+
+        // Determine Dynamic Ingestion Interval (F40) & Battery Power Saver Throttling (F48)
+        bool discharging = false;
+        int battery_pct = getBatteryLevel(discharging);
+        int requested_interval = 10000; // default 10 seconds
+        if (discharging && battery_pct >= 0 && battery_pct < 20) {
+            requested_interval = 30000; // throttle frequency to 30 seconds
+        }
+
+        std::stringstream ss_resp;
+        ss_resp << "HTTP/1.1 200 OK\r\n"
+                << "Content-Type: application/json\r\n"
+                << "Access-Control-Allow-Origin: *\r\n\r\n"
+                << "{\"status\":\"ok\",\"requested_interval\":" << requested_interval << "}";
+        std::string response = ss_resp.str();
         send(new_socket, response.c_str(), response.length(), 0);
         close(new_socket);
 
-        if (g_tracking_paused) {
+        if (isTelemetryPaused()) {
             std::cout << "[Edge Daemon] Ingestion paused. Ignoring telemetry point." << std::endl;
             continue;
         }
