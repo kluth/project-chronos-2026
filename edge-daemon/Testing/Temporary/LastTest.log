@@ -1,10 +1,10 @@
-Start testing: Jun 16 14:39 CEST
+Start testing: Jun 16 19:18 CEST
 ----------------------------------------------------------
 1/1 Testing: PropertyBasedDPTests
 1/1 Test: PropertyBasedDPTests
 Command: "/home/matthias/project/project-chronos/edge-daemon/edge-daemon-tests"
 Directory: /home/matthias/project/project-chronos/edge-daemon
-"PropertyBasedDPTests" start time: Jun 16 14:39 CEST
+"PropertyBasedDPTests" start time: Jun 16 19:18 CEST
 Output:
 ----------------------------------------------------------
 Running Differential Privacy Tests...
@@ -19,7 +19,7 @@ Process scanner run complete. Found 1 active target tools.
   - bash
 [PASS] Native Process Scanner /proc Monitor Test
 [PASS] GDPR Telemetry Test
-[Backup] SQLite tables backed up to /home/matthias/Downloads/chronos_backups/chronos_backup_20260616_143904.json
+[Backup] SQLite tables backed up to /home/matthias/Downloads/chronos_backups/chronos_backup_20260616_191824.json
 [PASS] Automated Shared Folder Snapshots Test
 [PASS] Tracking Paused Atomic Flag Test
 [PASS] Battery Power Saver Test
@@ -50,11 +50,11 @@ Future timestamp (+59s) verification: failed
 [PASS] Adversarial Signature Tests completed.
 Running adversarial timing tests...
 constantTimeCompare timing over 5000000 iterations:
-  Different length (short): 112.509 ms
-  Different start: 3068.63 ms
-  Different end: 3077.83 ms
+  Different length (short): 143.746 ms
+  Different start: 3219.67 ms
+  Different end: 3182.72 ms
 [EXPECTED BUG CONFIRMED] Length check is not constant-time (short signature is processed significantly faster).
-  Start vs End character mismatch difference: 0.299702%
+  Start vs End character mismatch difference: 1.14772%
 [PASS] Adversarial Timing Tests completed.
 Running adversarial pause tests...
 [Daemon] Override pause has expired. Resuming tracking.
@@ -63,13 +63,56 @@ Pause override negative duration (-3600s). isTelemetryPaused() result: not pause
 Pause override huge duration (3e9s, casted to 2147483647). isTelemetryPaused() result: paused (g_override_paused=true)
 Casted duration did not overflow to negative integer (depends on standard library implementation of double-to-int conversion out-of-range).
 [PASS] Adversarial Pause Tests completed.
+Running adversarial GDPR metrics tests...
+  Raw zero keystrokes: 0 -> Anonymized: 2.48252
+  Raw zero mouse: 0 -> Anonymized: 3.9597
+  Raw high keystrokes (100k): 100000 -> Anonymized: 100001
+  Raw high mouse (100k): 100000 -> Anonymized: 99999.6
+  Raw overflow (1e300): 1e+300 -> Anonymized: 1e+300
+  Raw negative (-100): -100 -> Anonymized: 0
+  Out of 1000 anonymizations of 0 keystrokes, 0 resulted in negative values.
+[Warning] Invalid parameters for generateLaplaceNoise: sensitivity=1, epsilon=0. Returning 0.0 noise.
+  Laplace noise with epsilon=0.0: 0
+[Warning] Invalid parameters for generateLaplaceNoise: sensitivity=1, epsilon=-0.5. Returning 0.0 noise.
+  Laplace noise with negative epsilon (-0.5): 0
+[Warning] Invalid parameters for generateLaplaceNoise: sensitivity=1, epsilon=9.99989e-321. Returning 0.0 noise.
+  Laplace noise with extremely small epsilon (1e-320): 0
+[Warning] Invalid parameters for generateLaplaceNoise: sensitivity=1, epsilon=1e-300. Returning 0.0 noise.
+  Laplace noise with epsilon=1e-300: 0
+[Warning] bufferEvent: event value is not finite (inf) for metric keystrokes_per_minute. Clamping to 0.0.
+[Warning] bufferEvent: event value is not finite (nan) for metric mouse_pixels_per_minute. Clamping to 0.0.
+  Buffering NaN event returned: true
+[Backup] SQLite tables backed up to /home/matthias/Downloads/chronos_backups/chronos_backup_20260616_191830.json
+  Backup JSON content sample:
+{
+  "timestamp": 1781630310,
+  "buffered_telemetry": [
+    {
+      "id": 1,
+      "metric_name": "keystrokes_per_minute",
+      "value": 0,
+      "timestamp": 1781630310
+    },
+    {
+      "id": 2,
+      "metric_name": "mouse_pixels_per_minute",
+      "value": 0,
+      "timestamp": 1781630310
+    }
+  ],
+  "privacy_budget_log": [
+
+  ]
+}
+
+[PASS] Adversarial GDPR Metrics Tests completed.
 All tests passed successfully.
 <end of output>
-Test time =   6.66 sec
+Test time =   7.25 sec
 ----------------------------------------------------------
 Test Passed.
-"PropertyBasedDPTests" end time: Jun 16 14:39 CEST
-"PropertyBasedDPTests" time elapsed: 00:00:06
+"PropertyBasedDPTests" end time: Jun 16 19:18 CEST
+"PropertyBasedDPTests" time elapsed: 00:00:07
 ----------------------------------------------------------
 
-End testing: Jun 16 14:39 CEST
+End testing: Jun 16 19:18 CEST

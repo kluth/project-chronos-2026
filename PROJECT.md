@@ -12,9 +12,9 @@ Chronos is a life-centric edge tracker. It consists of:
 |---|------|-------|-------------|--------|
 | 1 | Baseline & Feature Roadmap | Establish the 50-feature roadmap | None | DONE |
 | 2 | Edge Tracker enhancements | Implement 16 Edge Daemon & Extension features (F35-F50) | M1 | DONE |
-| 3 | Backend CRDT extensions | Implement 17 Firebase CRDT Backend features (F18-F34) | M2 | IN_PROGRESS (1a51d808-f04a-45b7-9440-91d776812a3a) |
-| 4 | Dashboard Visualization | Implement 17 Angular Dashboard features (F1-F17) | M3 | PLANNED |
-| 5 | Validation & Integrity Audit | Final build, verification, and audit | M4 | PLANNED |
+| 3 | Backend CRDT extensions | Implement 17 Firebase CRDT Backend features (F18-F34) | M2 | DONE |
+| 4 | Dashboard Visualization | Implement 17 Angular Dashboard features (F1-F17) | M3 | DONE |
+| 5 | Validation & Integrity Audit | Final build, verification, and audit | M4 | DONE |
 
 ## Code Layout
 - `/chromeos-extension/`: Browser extension files (`background.js`, `manifest.json`).

@@ -1,2 +1,2 @@
-PropertyBasedDPTests 2 3.32831
+PropertyBasedDPTests 3 2.41655
 ---

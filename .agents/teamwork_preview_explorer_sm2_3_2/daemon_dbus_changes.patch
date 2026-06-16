@@ -1,0 +1,332 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index b8e68cf..a7ef900 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -5,9 +5,14 @@ set(CMAKE_CXX_STANDARD 17)
+ set(CMAKE_CXX_STANDARD_REQUIRED True)
+ 
+ find_package(SQLite3 REQUIRED)
++find_package(PkgConfig REQUIRED)
++pkg_check_modules(SYSTEMD REQUIRED IMPORTED_TARGET libsystemd)
++pkg_check_modules(GTK3 REQUIRED IMPORTED_TARGET gtk+-3.0)
+ 
+ include_directories(src)
+ 
+ add_library(core_lib src/differential_privacy.cpp)
+ target_link_libraries(core_lib PUBLIC SQLite::SQLite3)
+ 
+ add_executable(edge-daemon src/main.cpp)
+-target_link_libraries(edge-daemon core_lib)
++target_link_libraries(edge-daemon core_lib PkgConfig::SYSTEMD)
++
++add_executable(edge-daemon-applet src/applet.c)
++target_link_libraries(edge-daemon-applet PkgConfig::GTK3 PkgConfig::SYSTEMD)
+ 
+ enable_testing()
+diff --git a/src/main.cpp b/src/main.cpp
+index 8e4f1a2..cd9a1ef 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -10,6 +10,9 @@
+ #include <cstring>
+ #include <sstream>
++#include <systemd/sd-bus.h>
++#include <atomic>
++#include <mutex>
+ #include "differential_privacy.h"
+ 
++std::atomic<bool> g_tracking_paused{false};
++std::mutex g_config_mutex;
++
+ // Helper to parse double safely
+ bool parseDouble(const std::string& str, double& val) {
+@@ -29,6 +32,11 @@ void backgroundTelemetryThread(const std::string& db_path) {
+     while (true) {
+         std::this_thread::sleep_for(std::chrono::seconds(10));
+         
++        if (g_tracking_paused.load()) {
++            std::cout << "[Background Monitor] Tracking is paused. Skipping telemetry loop." << std::endl;
++            continue;
++        }
++        
+         // 1. Process Scanning (F37)
+         auto active_tools = scanNativeProcesses();
+         for (const auto& tool : active_tools) {
+@@ -38,13 +46,18 @@ void backgroundTelemetryThread(const std::string& db_path) {
+             
+             double cumulative = getCumulativeEpsilon24h(db_path);
+-            double current_epsilon = g_config.epsilon;
++            double current_epsilon;
++            double config_budget;
++            {
++                std::lock_guard<std::mutex> lock(g_config_mutex);
++                current_epsilon = g_config.epsilon;
++                config_budget = g_config.budget;
++            }
+             
+-            if (g_config.budget > 0.0 && cumulative >= g_config.budget) {
+-                std::cout << "[Privacy Budget Check] Limit exceeded (" << cumulative << "/" << g_config.budget 
++            if (config_budget > 0.0 && cumulative >= config_budget) {
++                std::cout << "[Privacy Budget Check] Limit exceeded (" << cumulative << "/" << config_budget 
+                           << "). Skipping dev tool log for " << cleaned_event.metric_name << std::endl;
+                 continue;
+-            } else if (g_config.budget > 0.0 && cumulative >= 0.8 * g_config.budget) {
+-                current_epsilon = calculateAdjustedEpsilon(g_config.epsilon, g_config.budget, cumulative);
+-                std::cout << "[Privacy Budget Check] Approaching limit (" << cumulative << "/" << g_config.budget 
++            } else if (config_budget > 0.0 && cumulative >= 0.8 * config_budget) {
++                current_epsilon = calculateAdjustedEpsilon(current_epsilon, config_budget, cumulative);
++                std::cout << "[Privacy Budget Check] Approaching limit (" << cumulative << "/" << config_budget 
+                           << "). Adjusting epsilon to " << current_epsilon << std::endl;
+             }
+@@ -76,13 +89,18 @@ void backgroundTelemetryThread(const std::string& db_path) {
+                 
+                 double cumulative = getCumulativeEpsilon24h(db_path);
+-                double current_epsilon = g_config.epsilon;
++                double current_epsilon;
++                double config_budget;
++                {
++                    std::lock_guard<std::mutex> lock(g_config_mutex);
++                    current_epsilon = g_config.epsilon;
++                    config_budget = g_config.budget;
++                }
+                 
+-                if (g_config.budget > 0.0 && cumulative >= g_config.budget) {
++                if (config_budget > 0.0 && cumulative >= config_budget) {
+                     std::cout << "[Privacy Budget Check] Limit exceeded. Skipping CPU telemetry." << std::endl;
+                 } else {
+-                    if (g_config.budget > 0.0 && cumulative >= 0.8 * g_config.budget) {
+-                        current_epsilon = calculateAdjustedEpsilon(g_config.epsilon, g_config.budget, cumulative);
+-                    }
++                    if (config_budget > 0.0 && cumulative >= 0.8 * config_budget) {
++                        current_epsilon = calculateAdjustedEpsilon(current_epsilon, config_budget, cumulative);
++                    }
+                     TelemetryEvent safe_event = anonymizeEvent(cleaned_event, current_epsilon);
+                     logPrivacyEpsilon(current_epsilon, db_path);
+@@ -108,13 +126,18 @@ void backgroundTelemetryThread(const std::string& db_path) {
+             
+             double cumulative = getCumulativeEpsilon24h(db_path);
+-            double current_epsilon = g_config.epsilon;
++            double current_epsilon;
++            double config_budget;
++            {
++                std::lock_guard<std::mutex> lock(g_config_mutex);
++                current_epsilon = g_config.epsilon;
++                config_budget = g_config.budget;
++            }
+             
+-            if (g_config.budget > 0.0 && cumulative >= g_config.budget) {
++            if (config_budget > 0.0 && cumulative >= config_budget) {
+                 std::cout << "[Privacy Budget Check] Limit exceeded. Skipping RAM telemetry." << std::endl;
+             } else {
+-                if (g_config.budget > 0.0 && cumulative >= 0.8 * g_config.budget) {
+-                    current_epsilon = calculateAdjustedEpsilon(g_config.epsilon, g_config.budget, cumulative);
+-                }
++                if (config_budget > 0.0 && cumulative >= 0.8 * config_budget) {
++                    current_epsilon = calculateAdjustedEpsilon(current_epsilon, config_budget, cumulative);
++                }
+                 TelemetryEvent safe_event = anonymizeEvent(cleaned_event, current_epsilon);
+                 logPrivacyEpsilon(current_epsilon, db_path);
+@@ -139,4 +162,126 @@ void backgroundTelemetryThread(const std::string& db_path) {
+ }
+ 
++// DBus System Event Listener (F36) implementation
++int on_prepare_for_sleep(sd_bus_message *m, void *userdata, sd_bus_error *ret_error) {
++    int active;
++    int r = sd_bus_message_read(m, "b", &active);
++    if (r >= 0) {
++        if (active) {
++            std::cout << "[DBus Listener] System preparing to sleep. Pausing tracking." << std::endl;
++            g_tracking_paused = true;
++        } else {
++            std::cout << "[DBus Listener] System resumed from sleep. Resuming tracking." << std::endl;
++            g_tracking_paused = false;
++        }
++    }
++    return 0;
++}
++
++int on_session_lock(sd_bus_message *m, void *userdata, sd_bus_error *ret_error) {
++    std::cout << "[DBus Listener] Session locked. Pausing tracking." << std::endl;
++    g_tracking_paused = true;
++    return 0;
++}
++
++int on_session_unlock(sd_bus_message *m, void *userdata, sd_bus_error *ret_error) {
++    std::cout << "[DBus Listener] Session unlocked. Resuming tracking." << std::endl;
++    g_tracking_paused = false;
++    return 0;
++}
++
++void dbusSystemEventListenerThread() {
++    sd_bus *bus = nullptr;
++    int r = sd_bus_open_system(&bus);
++    if (r < 0) {
++        std::cerr << "[DBus Listener] Failed to connect to system bus: " << strerror(-r) << std::endl;
++        return;
++    }
++    
++    sd_bus_slot *slot_sleep = nullptr;
++    sd_bus_slot *slot_lock = nullptr;
++    sd_bus_slot *slot_unlock = nullptr;
++    
++    r = sd_bus_add_match(bus, &slot_sleep,
++                         "type='signal',sender='org.freedesktop.login1',interface='org.freedesktop.login1.Manager',member='PrepareForSleep'",
++                         on_prepare_for_sleep, nullptr);
++    r = sd_bus_add_match(bus, &slot_lock,
++                         "type='signal',sender='org.freedesktop.login1',interface='org.freedesktop.login1.Session',member='Lock'",
++                         on_session_lock, nullptr);
++    r = sd_bus_add_match(bus, &slot_unlock,
++                         "type='signal',sender='org.freedesktop.login1',interface='org.freedesktop.login1.Session',member='Unlock'",
++                         on_session_unlock, nullptr);
++    
++    std::cout << "[DBus Listener] System Event Listener thread started." << std::endl;
++    
++    while (true) {
++        r = sd_bus_process(bus, nullptr);
++        if (r < 0) break;
++        if (r > 0) continue;
++        r = sd_bus_wait(bus, 1000000); // Wait up to 1 second
++        if (r < 0) break;
++    }
++    
++    sd_bus_slot_unref(slot_sleep);
++    sd_bus_slot_unref(slot_lock);
++    sd_bus_slot_unref(slot_unlock);
++    sd_bus_close_unref(bus);
++}
++
++// DBus Session Controller (F42 IPC) implementation
++static int method_pause(sd_bus_message *m, void *userdata, sd_bus_error *ret_error) {
++    g_tracking_paused = true;
++    std::cout << "[DBus Controller] Tracking paused." << std::endl;
++    return sd_bus_reply_method_return(m, "s", "Tracking paused");
++}
++
++static int method_resume(sd_bus_message *m, void *userdata, sd_bus_error *ret_error) {
++    g_tracking_paused = false;
++    std::cout << "[DBus Controller] Tracking resumed." << std::endl;
++    return sd_bus_reply_method_return(m, "s", "Tracking resumed");
++}
++
++static int method_configure(sd_bus_message *m, void *userdata, sd_bus_error *ret_error) {
++    double eps, sens, budget;
++    int r = sd_bus_message_read(m, "ddd", &eps, &sens, &budget);
++    if (r < 0) {
++        return sd_bus_reply_method_errorf(m, SD_BUS_ERROR_INVALID_ARGS, "Expected three doubles");
++    }
++    {
++        std::lock_guard<std::mutex> lock(g_config_mutex);
++        g_config.epsilon = eps;
++        g_config.sensitivity = sens;
++        g_config.budget = budget;
++    }
++    std::cout << "[DBus Controller] Reconfigured via D-Bus: epsilon=" << eps << ", budget=" << budget << std::endl;
++    return sd_bus_reply_method_return(m, "s", "Reconfigured successfully");
++}
++
++static int method_get_status(sd_bus_message *m, void *userdata, sd_bus_error *ret_error) {
++    double eps, sens, budget;
++    {
++        std::lock_guard<std::mutex> lock(g_config_mutex);
++        eps = g_config.epsilon;
++        sens = g_config.sensitivity;
++        budget = g_config.budget;
++    }
++    double cumulative = getCumulativeEpsilon24h("telemetry_buffer.db");
++    return sd_bus_reply_method_return(m, "bdddd", (int)g_tracking_paused.load(), eps, sens, budget, cumulative);
++}
++
++static const sd_bus_vtable control_vtable[] = {
++    SD_BUS_VTABLE_START(0),
++    SD_BUS_METHOD("Pause", "", "s", method_pause, SD_BUS_VTABLE_UNPRIVILEGED),
++    SD_BUS_METHOD("Resume", "", "s", method_resume, SD_BUS_VTABLE_UNPRIVILEGED),
++    SD_BUS_METHOD("Configure", "ddd", "s", method_configure, SD_BUS_VTABLE_UNPRIVILEGED),
++    SD_BUS_METHOD("GetStatus", "", "bdddd", method_get_status, SD_BUS_VTABLE_UNPRIVILEGED),
++    SD_BUS_VTABLE_END
++};
++
++void dbusSessionControllerThread() {
++    sd_bus *bus = nullptr;
++    int r = sd_bus_open_user(&bus);
++    if (r < 0) {
++        std::cerr << "[DBus Controller] Failed to connect to user bus: " << strerror(-r) << std::endl;
++        return;
++    }
++    
++    r = sd_bus_add_object_vtable(bus, nullptr, "/org/chronos/EdgeDaemon", "org.chronos.EdgeDaemon.Controller", control_vtable, nullptr);
++    if (r < 0) {
++        std::cerr << "[DBus Controller] Failed to register vtable: " << strerror(-r) << std::endl;
++        sd_bus_close_unref(bus);
++        return;
++    }
++    
++    r = sd_bus_request_name(bus, "org.chronos.EdgeDaemon", 0);
++    if (r < 0) {
++        std::cerr << "[DBus Controller] Failed to request name: " << strerror(-r) << std::endl;
++        sd_bus_close_unref(bus);
++        return;
++    }
++    
++    std::cout << "[DBus Controller] Session Controller registered on org.chronos.EdgeDaemon." << std::endl;
++    
++    while (true) {
++        r = sd_bus_process(bus, nullptr);
++        if (r < 0) break;
++        if (r > 0) continue;
++        r = sd_bus_wait(bus, 1000000);
++        if (r < 0) break;
++    }
++    
++    sd_bus_close_unref(bus);
++}
++
+ int main(int argc, char* argv[]) {
+     bool calibrate = false;
+@@ -219,4 +364,10 @@ int main(int argc, char* argv[]) {
+     std::thread bg_thread(backgroundTelemetryThread, DB_PATH);
+     bg_thread.detach();
++    
++    std::thread dbus_sys_thread(dbusSystemEventListenerThread);
++    dbus_sys_thread.detach();
++
++    std::thread dbus_user_thread(dbusSessionControllerThread);
++    dbus_user_thread.detach();
+ 
+     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+@@ -241,4 +392,9 @@ int main(int argc, char* argv[]) {
+         char buffer[2048] = {0};
+         read(new_socket, buffer, 2048);
++        if (g_tracking_paused.load()) {
++            std::string response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n\r\n{\"status\":\"paused\"}";
++            send(new_socket, response.c_str(), response.length(), 0);
++            close(new_socket);
++            continue;
++        }
+         std::string request(buffer);
+ 
+@@ -268,13 +424,18 @@ int main(int argc, char* argv[]) {
+             // Apply differential privacy with budget check (F39)
+             double cumulative = getCumulativeEpsilon24h(DB_PATH);
+-            double current_epsilon = g_config.epsilon;
++            double current_epsilon;
++            double config_budget;
++            {
++                std::lock_guard<std::mutex> lock(g_config_mutex);
++                current_epsilon = g_config.epsilon;
++                config_budget = g_config.budget;
++            }
+             
+-            if (g_config.budget > 0.0 && cumulative >= g_config.budget) {
+-                std::cout << "[Privacy Budget Check] Limit exceeded (" << cumulative << "/" << g_config.budget 
++            if (config_budget > 0.0 && cumulative >= config_budget) {
++                std::cout << "[Privacy Budget Check] Limit exceeded (" << cumulative << "/" << config_budget 
+                           << "). Ingestion paused for " << cleaned_event.metric_name << std::endl;
+                 continue;
+-            } else if (g_config.budget > 0.0 && cumulative >= 0.8 * g_config.budget) {
+-                current_epsilon = calculateAdjustedEpsilon(g_config.epsilon, g_config.budget, cumulative);
+-                std::cout << "[Privacy Budget Check] Approaching limit (" << cumulative << "/" << g_config.budget 
++            } else if (config_budget > 0.0 && cumulative >= 0.8 * config_budget) {
++                current_epsilon = calculateAdjustedEpsilon(current_epsilon, config_budget, cumulative);
++                std::cout << "[Privacy Budget Check] Approaching limit (" << cumulative << "/" << config_budget 
+                           << "). Adjusting epsilon to " << current_epsilon << std::endl;
+             }

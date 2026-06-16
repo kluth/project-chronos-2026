@@ -1,0 +1,66 @@
+cmake_minimum_required(VERSION 3.10)
+project(EdgeDaemon)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED True)
+
+# Find SQLite3 for telemetry buffers
+find_package(SQLite3 REQUIRED)
+
+# Find PkgConfig for DBus, GLib/GIO, and GTK 3
+find_package(PkgConfig REQUIRED)
+
+# Query library information
+pkg_check_modules(GLIB REQUIRED glib-2.0 gio-2.0)
+pkg_check_modules(GTK REQUIRED gtk+-3.0)
+pkg_check_modules(DBUS REQUIRED dbus-1)
+
+include_directories(
+    src
+    ${GLIB_INCLUDE_DIRS}
+    ${GTK_INCLUDE_DIRS}
+    ${DBUS_INCLUDE_DIRS}
+)
+
+link_directories(
+    ${GLIB_LIBRARY_DIRS}
+    ${GTK_LIBRARY_DIRS}
+    ${DBUS_LIBRARY_DIRS}
+)
+
+# Core Library for Differential Privacy algorithms and SQLite storage
+add_library(core_lib src/differential_privacy.cpp)
+target_link_libraries(core_lib PUBLIC SQLite::SQLite3)
+
+# Edge Daemon containing:
+# - Process Scanner (src/main.cpp)
+# - Socket Ingest Server (src/main.cpp)
+# - D-Bus System Event Listener for Suspend/Lock (src/dbus_listener.cpp)
+# - D-Bus Session IPC Server for the Applet (src/dbus_ipc.cpp)
+add_executable(edge-daemon 
+    src/main.cpp 
+    src/dbus_listener.cpp 
+    src/dbus_ipc.cpp
+)
+target_link_libraries(edge-daemon 
+    PRIVATE 
+    core_lib 
+    ${GLIB_LIBRARIES} 
+    ${DBUS_LIBRARIES}
+)
+
+# System Tray Daemon Controller Applet executable
+add_executable(chronos-applet 
+    src/applet.cpp
+)
+target_link_libraries(chronos-applet 
+    PRIVATE 
+    ${GTK_LIBRARIES} 
+    ${GLIB_LIBRARIES}
+)
+
+# Tests
+enable_testing()
+add_executable(edge-daemon-tests tests/differential_privacy_test.cpp)
+target_link_libraries(edge-daemon-tests core_lib)
+add_test(NAME PropertyBasedDPTests COMMAND edge-daemon-tests)

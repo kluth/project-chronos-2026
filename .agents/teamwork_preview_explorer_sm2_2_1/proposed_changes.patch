@@ -1,0 +1,673 @@
+diff -Nur -x build -x CMakeFiles -x CMakeCache.txt -x Makefile -x cmake_install.cmake -x edge-daemon -x edge-daemon-tests -x libcore_lib.a edge-daemon/src/differential_privacy.cpp temp_verification/src/differential_privacy.cpp
+--- edge-daemon/src/differential_privacy.cpp	2026-06-16 13:13:52.918014062 +0200
++++ temp_verification/src/differential_privacy.cpp	2026-06-16 13:18:41.339434865 +0200
+@@ -8,6 +8,11 @@
+ #include <vector>
+ #include <algorithm>
+ #include <cstring>
++#include <dirent.h>
++#include <fstream>
++#include <set>
++#include <filesystem>
++
+ 
+ // For Network State Checker
+ #include <ifaddrs.h>
+@@ -413,3 +418,340 @@
+     }
+ }
+ 
++// F39: Local Privacy Budget Tracker
++bool initPrivacyBudgetTable(const std::string& db_path) {
++    sqlite3* db = nullptr;
++    int rc = sqlite3_open(db_path.c_str(), &db);
++    if (rc != SQLITE_OK) {
++        if (db) {
++            sqlite3_close(db);
++        }
++        return false;
++    }
++
++    const char* sql = "CREATE TABLE IF NOT EXISTS privacy_budget_log ("
++                      "id INTEGER PRIMARY KEY AUTOINCREMENT, "
++                      "epsilon REAL NOT NULL, "
++                      "timestamp INTEGER NOT NULL);";
++    char* err_msg = nullptr;
++    rc = sqlite3_exec(db, sql, nullptr, nullptr, &err_msg);
++    if (rc != SQLITE_OK) {
++        if (err_msg) {
++            sqlite3_free(err_msg);
++        }
++        sqlite3_close(db);
++        return false;
++    }
++
++    sqlite3_close(db);
++    return true;
++}
++
++bool logPrivacyEpsilon(double epsilon, const std::string& db_path) {
++    sqlite3* db = nullptr;
++    int rc = sqlite3_open(db_path.c_str(), &db);
++    if (rc != SQLITE_OK) {
++        if (db) {
++            sqlite3_close(db);
++        }
++        return false;
++    }
++
++    const char* sql = "INSERT INTO privacy_budget_log (epsilon, timestamp) VALUES (?, ?);";
++    sqlite3_stmt* stmt = nullptr;
++    rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
++    if (rc != SQLITE_OK) {
++        sqlite3_close(db);
++        return false;
++    }
++
++    sqlite3_bind_double(stmt, 1, epsilon);
++    sqlite3_bind_int64(stmt, 2, std::time(nullptr));
++
++    rc = sqlite3_step(stmt);
++    sqlite3_finalize(stmt);
++    sqlite3_close(db);
++
++    return (rc == SQLITE_DONE);
++}
++
++double getCumulativeEpsilon24h(const std::string& db_path) {
++    sqlite3* db = nullptr;
++    int rc = sqlite3_open(db_path.c_str(), &db);
++    if (rc != SQLITE_OK) {
++        if (db) {
++            sqlite3_close(db);
++        }
++        return 0.0;
++    }
++
++    long long current_time = std::time(nullptr);
++    long long threshold = current_time - 86400; // 24h ago
++
++    // First clean up records older than 24h
++    {
++        const char* sql_cleanup = "DELETE FROM privacy_budget_log WHERE timestamp < ?;";
++        sqlite3_stmt* stmt_cleanup = nullptr;
++        if (sqlite3_prepare_v2(db, sql_cleanup, -1, &stmt_cleanup, nullptr) == SQLITE_OK) {
++            sqlite3_bind_int64(stmt_cleanup, 1, threshold);
++            sqlite3_step(stmt_cleanup);
++            sqlite3_finalize(stmt_cleanup);
++        }
++    }
++
++    double cumulative_epsilon = 0.0;
++    const char* sql = "SELECT SUM(epsilon) FROM privacy_budget_log WHERE timestamp >= ?;";
++    sqlite3_stmt* stmt = nullptr;
++    rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
++    if (rc == SQLITE_OK) {
++        sqlite3_bind_int64(stmt, 1, threshold);
++        if (sqlite3_step(stmt) == SQLITE_ROW) {
++            cumulative_epsilon = sqlite3_column_double(stmt, 0);
++        }
++        sqlite3_finalize(stmt);
++    }
++
++    sqlite3_close(db);
++    return cumulative_epsilon;
++}
++
++double calculateAdjustedEpsilon(double base_epsilon, double budget, double cumulative_epsilon) {
++    if (budget <= 0.0 || cumulative_epsilon >= budget) {
++        return 0.0;
++    }
++    double warning_threshold = 0.8 * budget;
++    if (cumulative_epsilon < warning_threshold) {
++        return base_epsilon;
++    }
++    double remaining_ratio = (budget - cumulative_epsilon) / (budget - warning_threshold);
++    double adjusted = base_epsilon * remaining_ratio;
++    double min_epsilon = 0.005;
++    if (adjusted < min_epsilon) {
++        adjusted = min_epsilon;
++    }
++    return adjusted;
++}
++
++// F37: Native Process Scanner /proc Monitor
++std::vector<std::string> scanNativeProcesses() {
++    std::vector<std::string> detected;
++    DIR* dir = opendir("/proc");
++    if (!dir) return detected;
++    
++    struct dirent* entry = nullptr;
++    std::set<std::string> target_tools = {
++        "code", "code-oss", "bash", "zsh", "fish", "tmux", 
++        "python", "python3", "node", "docker", "git", 
++        "gcc", "g++", "make", "cmake"
++    };
++    
++    std::set<std::string> found;
++    
++    while ((entry = readdir(dir)) != nullptr) {
++        bool is_pid = true;
++        for (int i = 0; entry->d_name[i] != '\0'; ++i) {
++            if (!std::isdigit(entry->d_name[i])) {
++                is_pid = false;
++                break;
++            }
++        }
++        if (!is_pid || entry->d_name[0] == '\0') continue;
++        
++        std::string comm_path = std::string("/proc/") + entry->d_name + "/comm";
++        std::ifstream comm_file(comm_path);
++        if (comm_file.is_open()) {
++            std::string comm_name;
++            std::getline(comm_file, comm_name);
++            while (!comm_name.empty() && (comm_name.back() == '\n' || comm_name.back() == '\r' || comm_name.back() == ' ')) {
++                comm_name.pop_back();
++            }
++            if (target_tools.count(comm_name)) {
++                found.insert(comm_name);
++            }
++        }
++    }
++    closedir(dir);
++    
++    for (const auto& tool : found) {
++        detected.push_back(tool);
++    }
++    return detected;
++}
++
++// F44: Device Resource Performance Telemetry
++bool readCpuStats(CpuStats& stats) {
++    std::ifstream file("/proc/stat");
++    if (!file.is_open()) return false;
++    std::string line;
++    if (std::getline(file, line)) {
++        std::stringstream ss(line);
++        std::string cpu;
++        ss >> cpu;
++        if (cpu == "cpu") {
++            ss >> stats.user >> stats.nice >> stats.system >> stats.idle
++               >> stats.iowait >> stats.irq >> stats.softirq >> stats.steal;
++            return true;
++        }
++    }
++    return false;
++}
++
++double calculateCpuUtilization(const CpuStats& prev, const CpuStats& curr) {
++    unsigned long long prev_idle = prev.idle + prev.iowait;
++    unsigned long long curr_idle = curr.idle + curr.iowait;
++    
++    unsigned long long prev_non_idle = prev.user + prev.nice + prev.system + prev.irq + prev.softirq + prev.steal;
++    unsigned long long curr_non_idle = curr.user + curr.nice + curr.system + curr.irq + curr.softirq + curr.steal;
++    
++    unsigned long long prev_total = prev_idle + prev_non_idle;
++    unsigned long long curr_total = curr_idle + curr_non_idle;
++    
++    unsigned long long total_d = curr_total - prev_total;
++    unsigned long long idle_d = curr_idle - prev_idle;
++    
++    if (total_d == 0) return 0.0;
++    return static_cast<double>(total_d - idle_d) / total_d * 100.0;
++}
++
++bool getRamUtilization(double& ram_percent) {
++    std::ifstream file("/proc/meminfo");
++    if (!file.is_open()) return false;
++    
++    unsigned long long mem_total = 0;
++    unsigned long long mem_available = 0;
++    std::string key;
++    unsigned long long value;
++    std::string unit;
++    
++    int found_count = 0;
++    while (file >> key >> value >> unit) {
++        if (key == "MemTotal:") {
++            mem_total = value;
++            found_count++;
++        } else if (key == "MemAvailable:") {
++            mem_available = value;
++            found_count++;
++        }
++        if (found_count == 2) break;
++    }
++    
++    if (mem_total == 0) return false;
++    if (mem_available == 0) {
++        return false;
++    }
++    ram_percent = static_cast<double>(mem_total - mem_available) / mem_total * 100.0;
++    return true;
++}
++
++// F47: Automated Shared Folder Snapshots
++std::string getBackupDirPath() {
++    const char* home = std::getenv("HOME");
++    std::string path;
++    if (home) {
++        path = std::string(home) + "/Downloads/chronos_backups";
++    } else {
++        path = "./chronos_backups";
++    }
++    return path;
++}
++
++bool dumpBackupToJson(const std::string& db_path) {
++    std::string backup_dir = getBackupDirPath();
++    
++    try {
++        std::filesystem::create_directories(backup_dir);
++    } catch (const std::exception& e) {
++        std::cerr << "Failed to create backup directory: " << e.what() << std::endl;
++        return false;
++    }
++    
++    auto now = std::time(nullptr);
++    auto tm = *std::localtime(&now);
++    std::ostringstream oss;
++    oss << backup_dir << "/chronos_backup_" 
++        << std::put_time(&tm, "%Y%m%d_%H%M%S") << ".json";
++    std::string filename = oss.str();
++    
++    sqlite3* db = nullptr;
++    if (sqlite3_open(db_path.c_str(), &db) != SQLITE_OK) {
++        if (db) sqlite3_close(db);
++        return false;
++    }
++    
++    std::stringstream json;
++    json << "{\n";
++    json << "  \"timestamp\": " << now << ",\n";
++    
++    json << "  \"buffered_telemetry\": [\n";
++    const char* sql_tel = "SELECT id, metric_name, value, timestamp FROM telemetry_events ORDER BY id ASC;";
++    sqlite3_stmt* stmt = nullptr;
++    if (sqlite3_prepare_v2(db, sql_tel, -1, &stmt, nullptr) == SQLITE_OK) {
++        bool first = true;
++        while (sqlite3_step(stmt) == SQLITE_ROW) {
++            if (!first) json << ",\n";
++            first = false;
++            
++            int id = sqlite3_column_int(stmt, 0);
++            const unsigned char* name = sqlite3_column_text(stmt, 1);
++            double val = sqlite3_column_double(stmt, 2);
++            long long ts = sqlite3_column_int64(stmt, 3);
++            
++            std::string metric_name = name ? reinterpret_cast<const char*>(name) : "";
++            std::string escaped_name = "";
++            for (char c : metric_name) {
++                if (c == '"' || c == '\\') {
++                    escaped_name += '\\';
++                }
++                escaped_name += c;
++            }
++            
++            json << "    {\n"
++                 << "      \"id\": " << id << ",\n"
++                 << "      \"metric_name\": \"" << escaped_name << "\",\n"
++                 << "      \"value\": " << val << ",\n"
++                 << "      \"timestamp\": " << ts << "\n"
++                 << "    }";
++        }
++        sqlite3_finalize(stmt);
++    }
++    json << "\n  ],\n";
++    
++    json << "  \"privacy_budget_log\": [\n";
++    const char* sql_pb = "SELECT id, epsilon, timestamp FROM privacy_budget_log ORDER BY id ASC;";
++    stmt = nullptr;
++    if (sqlite3_prepare_v2(db, sql_pb, -1, &stmt, nullptr) == SQLITE_OK) {
++        bool first = true;
++        while (sqlite3_step(stmt) == SQLITE_ROW) {
++            if (!first) json << ",\n";
++            first = false;
++            
++            int id = sqlite3_column_int(stmt, 0);
++            double eps = sqlite3_column_double(stmt, 1);
++            long long ts = sqlite3_column_int64(stmt, 2);
++            
++            json << "    {\n"
++                 << "      \"id\": " << id << ",\n"
++                 << "      \"epsilon\": " << eps << ",\n"
++                 << "      \"timestamp\": " << ts << "\n"
++                 << "    }";
++        }
++        sqlite3_finalize(stmt);
++    }
++    json << "\n  ]\n";
++    json << "}\n";
++    
++    sqlite3_close(db);
++    
++    std::ofstream out_file(filename);
++    if (!out_file.is_open()) {
++        std::cerr << "Failed to write backup file: " << filename << std::endl;
++        return false;
++    }
++    out_file << json.str();
++    out_file.close();
++    
++    std::cout << "[Backup] SQLite tables backed up to " << filename << std::endl;
++    return true;
++}
++
++
+diff -Nur -x build -x CMakeFiles -x CMakeCache.txt -x Makefile -x cmake_install.cmake -x edge-daemon -x edge-daemon-tests -x libcore_lib.a edge-daemon/src/differential_privacy.h temp_verification/src/differential_privacy.h
+--- edge-daemon/src/differential_privacy.h	2026-06-16 13:13:44.341001265 +0200
++++ temp_verification/src/differential_privacy.h	2026-06-16 13:18:25.258411808 +0200
+@@ -46,3 +46,33 @@
+ bool deleteBufferedEvent(int id, const std::string& db_path);
+ void flushBuffer(const std::string& db_path);
+ 
++// F39: Local Privacy Budget Tracker
++bool initPrivacyBudgetTable(const std::string& db_path);
++bool logPrivacyEpsilon(double epsilon, const std::string& db_path);
++double getCumulativeEpsilon24h(const std::string& db_path);
++double calculateAdjustedEpsilon(double base_epsilon, double budget, double cumulative_epsilon);
++
++// F37: Native Process Scanner /proc Monitor
++std::vector<std::string> scanNativeProcesses();
++
++// F44: Device Resource Performance Telemetry
++struct CpuStats {
++    unsigned long long user = 0;
++    unsigned long long nice = 0;
++    unsigned long long system = 0;
++    unsigned long long idle = 0;
++    unsigned long long iowait = 0;
++    unsigned long long irq = 0;
++    unsigned long long softirq = 0;
++    unsigned long long steal = 0;
++};
++
++bool readCpuStats(CpuStats& stats);
++double calculateCpuUtilization(const CpuStats& prev, const CpuStats& curr);
++bool getRamUtilization(double& ram_percent);
++
++// F47: Automated Shared Folder Snapshots
++std::string getBackupDirPath();
++bool dumpBackupToJson(const std::string& db_path);
++
++
+diff -Nur -x build -x CMakeFiles -x CMakeCache.txt -x Makefile -x cmake_install.cmake -x edge-daemon -x edge-daemon-tests -x libcore_lib.a edge-daemon/src/main.cpp temp_verification/src/main.cpp
+--- edge-daemon/src/main.cpp	2026-06-16 13:14:02.265027985 +0200
++++ temp_verification/src/main.cpp	2026-06-16 13:19:03.035465912 +0200
+@@ -17,6 +17,127 @@
+     return (ss >> val) && ss.eof();
+ }
+ 
++void backgroundTelemetryThread(const std::string& db_path) {
++    std::cout << "[Background Monitor] Starting native process scanner and performance telemetry..." << std::endl;
++    
++    CpuStats prev_cpu;
++    bool has_cpu = readCpuStats(prev_cpu);
++    
++    auto last_backup_time = std::chrono::steady_clock::now();
++    const auto backup_interval = std::chrono::minutes(15);
++    
++    while (true) {
++        std::this_thread::sleep_for(std::chrono::seconds(10));
++        
++        // 1. Process Scanning (F37)
++        auto active_tools = scanNativeProcesses();
++        for (const auto& tool : active_tools) {
++            TelemetryEvent raw_event = { "dev_tool_" + tool, 10.0 };
++            std::string cleaned_metric = obfuscateDomainOrCategory(raw_event.metric_name);
++            TelemetryEvent cleaned_event = { cleaned_metric, raw_event.value };
++            
++            double cumulative = getCumulativeEpsilon24h(db_path);
++            double current_epsilon = g_config.epsilon;
++            
++            if (g_config.budget > 0.0 && cumulative >= g_config.budget) {
++                std::cout << "[Privacy Budget Check] Limit exceeded (" << cumulative << "/" << g_config.budget 
++                          << "). Skipping dev tool log for " << cleaned_event.metric_name << std::endl;
++                continue;
++            } else if (g_config.budget > 0.0 && cumulative >= 0.8 * g_config.budget) {
++                current_epsilon = calculateAdjustedEpsilon(g_config.epsilon, g_config.budget, cumulative);
++                std::cout << "[Privacy Budget Check] Approaching limit (" << cumulative << "/" << g_config.budget 
++                          << "). Adjusting epsilon to " << current_epsilon << std::endl;
++            }
++            
++            TelemetryEvent safe_event = anonymizeEvent(cleaned_event, current_epsilon);
++            logPrivacyEpsilon(current_epsilon, db_path);
++            
++            std::cout << "[Background Scanner] Found active process: " << tool << ". Buffering/transmitting..." << std::endl;
++            if (isNetworkOnline()) {
++                flushBuffer(db_path);
++                if (!runCurlSafe(safe_event.metric_name, safe_event.value)) {
++                    bufferEvent(safe_event, db_path);
++                }
++            } else {
++                bufferEvent(safe_event, db_path);
++            }
++        }
++        
++        // 2. Resource Telemetry (F44)
++        if (has_cpu) {
++            CpuStats curr_cpu;
++            if (readCpuStats(curr_cpu)) {
++                double cpu_util = calculateCpuUtilization(prev_cpu, curr_cpu);
++                prev_cpu = curr_cpu;
++                
++                TelemetryEvent raw_event = { "cpu_utilization", cpu_util };
++                std::string cleaned_metric = obfuscateDomainOrCategory(raw_event.metric_name);
++                TelemetryEvent cleaned_event = { cleaned_metric, raw_event.value };
++                
++                double cumulative = getCumulativeEpsilon24h(db_path);
++                double current_epsilon = g_config.epsilon;
++                
++                if (g_config.budget > 0.0 && cumulative >= g_config.budget) {
++                    std::cout << "[Privacy Budget Check] Limit exceeded. Skipping CPU telemetry." << std::endl;
++                } else {
++                    if (g_config.budget > 0.0 && cumulative >= 0.8 * g_config.budget) {
++                        current_epsilon = calculateAdjustedEpsilon(g_config.epsilon, g_config.budget, cumulative);
++                    }
++                    TelemetryEvent safe_event = anonymizeEvent(cleaned_event, current_epsilon);
++                    logPrivacyEpsilon(current_epsilon, db_path);
++                    
++                    if (isNetworkOnline()) {
++                        flushBuffer(db_path);
++                        if (!runCurlSafe(safe_event.metric_name, safe_event.value)) {
++                            bufferEvent(safe_event, db_path);
++                        }
++                    } else {
++                        bufferEvent(safe_event, db_path);
++                    }
++                }
++            }
++        } else {
++            has_cpu = readCpuStats(prev_cpu);
++        }
++        
++        double ram_util = 0.0;
++        if (getRamUtilization(ram_util)) {
++            TelemetryEvent raw_event = { "ram_utilization", ram_util };
++            std::string cleaned_metric = obfuscateDomainOrCategory(raw_event.metric_name);
++            TelemetryEvent cleaned_event = { cleaned_metric, raw_event.value };
++            
++            double cumulative = getCumulativeEpsilon24h(db_path);
++            double current_epsilon = g_config.epsilon;
++            
++            if (g_config.budget > 0.0 && cumulative >= g_config.budget) {
++                std::cout << "[Privacy Budget Check] Limit exceeded. Skipping RAM telemetry." << std::endl;
++            } else {
++                if (g_config.budget > 0.0 && cumulative >= 0.8 * g_config.budget) {
++                    current_epsilon = calculateAdjustedEpsilon(g_config.epsilon, g_config.budget, cumulative);
++                }
++                TelemetryEvent safe_event = anonymizeEvent(cleaned_event, current_epsilon);
++                logPrivacyEpsilon(current_epsilon, db_path);
++                
++                if (isNetworkOnline()) {
++                    flushBuffer(db_path);
++                    if (!runCurlSafe(safe_event.metric_name, safe_event.value)) {
++                        bufferEvent(safe_event, db_path);
++                    }
++                } else {
++                    bufferEvent(safe_event, db_path);
++                }
++            }
++        }
++        
++        // 3. Automated Backup Snapshot (F47)
++        auto now_time = std::chrono::steady_clock::now();
++        if (now_time - last_backup_time >= backup_interval) {
++            dumpBackupToJson(db_path);
++            last_backup_time = now_time;
++        }
++    }
++}
++
+ int main(int argc, char* argv[]) {
+     bool calibrate = false;
+     for (int i = 1; i < argc; ++i) {
+@@ -91,6 +212,13 @@
+         std::cerr << "Failed to initialize SQLite buffer database." << std::endl;
+         return 1;
+     }
++    if (!initPrivacyBudgetTable(DB_PATH)) {
++        std::cerr << "Failed to initialize SQLite privacy budget log." << std::endl;
++        return 1;
++    }
++
++    std::thread bg_thread(backgroundTelemetryThread, DB_PATH);
++    bg_thread.detach();
+ 
+     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+     int opt = 1;
+@@ -137,8 +265,22 @@
+             std::string cleaned_metric = obfuscateDomainOrCategory(event.metric_name);
+             TelemetryEvent cleaned_event = { cleaned_metric, event.value };
+ 
+-            // Apply differential privacy
+-            TelemetryEvent safe_event = anonymizeEvent(cleaned_event, g_config.epsilon);
++            // Apply differential privacy with budget check (F39)
++            double cumulative = getCumulativeEpsilon24h(DB_PATH);
++            double current_epsilon = g_config.epsilon;
++            
++            if (g_config.budget > 0.0 && cumulative >= g_config.budget) {
++                std::cout << "[Privacy Budget Check] Limit exceeded (" << cumulative << "/" << g_config.budget 
++                          << "). Ingestion paused for " << cleaned_event.metric_name << std::endl;
++                continue;
++            } else if (g_config.budget > 0.0 && cumulative >= 0.8 * g_config.budget) {
++                current_epsilon = calculateAdjustedEpsilon(g_config.epsilon, g_config.budget, cumulative);
++                std::cout << "[Privacy Budget Check] Approaching limit (" << cumulative << "/" << g_config.budget 
++                          << "). Adjusting epsilon to " << current_epsilon << std::endl;
++            }
++
++            TelemetryEvent safe_event = anonymizeEvent(cleaned_event, current_epsilon);
++            logPrivacyEpsilon(current_epsilon, DB_PATH);
+             
+             std::cout << "\n--- ChromeOS Host Ingestion Cycle ---" << std::endl;
+             std::cout << "Real Host Window: " << event.metric_name << " | Raw duration: " << event.value << "s" << std::endl;
+diff -Nur -x build -x CMakeFiles -x CMakeCache.txt -x Makefile -x cmake_install.cmake -x edge-daemon -x edge-daemon-tests -x libcore_lib.a edge-daemon/tests/differential_privacy_test.cpp temp_verification/tests/differential_privacy_test.cpp
+--- edge-daemon/tests/differential_privacy_test.cpp	2026-06-16 13:14:45.309091818 +0200
++++ temp_verification/tests/differential_privacy_test.cpp	2026-06-16 13:19:28.345502044 +0200
+@@ -100,6 +100,95 @@
+     std::cout << "[PASS] Crostini Network State Checker Test (verification complete)" << std::endl;
+ }
+ 
++void testPrivacyBudgetTracker() {
++    const std::string test_db = "test_budget.db";
++    std::remove(test_db.c_str());
++
++    assert(initPrivacyBudgetTable(test_db) == true);
++    
++    // Cumulative budget should be 0 initially
++    assert(getCumulativeEpsilon24h(test_db) == 0.0);
++
++    // Log some epsilon usage
++    assert(logPrivacyEpsilon(0.5, test_db) == true);
++    assert(logPrivacyEpsilon(0.3, test_db) == true);
++
++    // Cumulative should be 0.8
++    double cum = getCumulativeEpsilon24h(test_db);
++    assert(std::abs(cum - 0.8) < 1e-9);
++
++    // Test adjustment logic
++    double base_eps = 0.5;
++    double budget = 1.0;
++    
++    // Below warning threshold (warning threshold is 0.8 * budget = 0.8)
++    assert(calculateAdjustedEpsilon(base_eps, budget, 0.7) == base_eps);
++    
++    // At warning threshold
++    assert(calculateAdjustedEpsilon(base_eps, budget, 0.8) == base_eps);
++
++    // Midway between warning and budget (0.9 is halfway between 0.8 and 1.0)
++    // ratio = (1.0 - 0.9) / (1.0 - 0.8) = 0.1 / 0.2 = 0.5
++    // adjusted = base_eps * 0.5 = 0.25
++    double adjusted = calculateAdjustedEpsilon(base_eps, budget, 0.9);
++    assert(std::abs(adjusted - 0.25) < 1e-9);
++
++    // Exceeding budget
++    assert(calculateAdjustedEpsilon(base_eps, budget, 1.1) == 0.0);
++
++    std::remove(test_db.c_str());
++    std::cout << "[PASS] Local Privacy Budget Tracker Test" << std::endl;
++}
++
++void testProcessScanner() {
++    auto tools = scanNativeProcesses();
++    std::cout << "Process scanner run complete. Found " << tools.size() << " active target tools." << std::endl;
++    for (const auto& t : tools) {
++        std::cout << "  - " << t << std::endl;
++    }
++    std::cout << "[PASS] Native Process Scanner /proc Monitor Test" << std::endl;
++}
++
++void testResourcePerformanceTelemetry() {
++    CpuStats stats1, stats2;
++    bool read1 = readCpuStats(stats1);
++    std::cout << "CPU stats reading: " << (read1 ? "Success" : "Failure") << std::endl;
++    
++    if (read1) {
++        stats2 = stats1;
++        stats2.idle += 100;
++        stats2.user += 100;
++        double util = calculateCpuUtilization(stats1, stats2);
++        assert(std::abs(util - 50.0) < 1.0);
++    }
++
++    double ram_util = 0.0;
++    bool read_ram = getRamUtilization(ram_util);
++    std::cout << "RAM stats reading: " << (read_ram ? "Success" : "Failure") << std::endl;
++    if (read_ram) {
++        assert(ram_util >= 0.0 && ram_util <= 100.0);
++    }
++    std::cout << "[PASS] Device Resource Performance Telemetry Test" << std::endl;
++}
++
++void testSharedFolderSnapshots() {
++    const std::string test_db = "test_snapshot.db";
++    std::remove(test_db.c_str());
++
++    assert(initDatabase(test_db) == true);
++    assert(initPrivacyBudgetTable(test_db) == true);
++
++    TelemetryEvent ev = {"test-snap", 10.0};
++    assert(bufferEvent(ev, test_db) == true);
++    assert(logPrivacyEpsilon(0.5, test_db) == true);
++
++    bool backup_res = dumpBackupToJson(test_db);
++    assert(backup_res == true);
++
++    std::remove(test_db.c_str());
++    std::cout << "[PASS] Automated Shared Folder Snapshots Test" << std::endl;
++}
++
+ int main() {
+     std::cout << "Running Differential Privacy Tests..." << std::endl;
+     testLaplaceNoiseDistribution();
+@@ -107,6 +196,10 @@
+     testDomainObfuscation();
+     testSQLiteBuffering();
+     testNetworkChecker();
++    testPrivacyBudgetTracker();
++    testProcessScanner();
++    testResourcePerformanceTelemetry();
++    testSharedFolderSnapshots();
+     std::cout << "All tests passed successfully." << std::endl;
+     return 0;
+ }

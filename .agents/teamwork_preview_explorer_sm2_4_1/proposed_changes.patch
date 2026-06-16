@@ -1,0 +1,345 @@
+diff --git a/edge-daemon/CMakeLists.txt b/edge-daemon/CMakeLists.txt
+index a123456..b789012 100644
+--- a/edge-daemon/CMakeLists.txt
++++ b/edge-daemon/CMakeLists.txt
+@@ -6,8 +6,9 @@ set(CMAKE_CXX_STANDARD 17)
+ set(CMAKE_CXX_STANDARD_REQUIRED True)
+ 
+ find_package(SQLite3 REQUIRED)
+ find_package(PkgConfig REQUIRED)
++find_package(OpenSSL REQUIRED)
+ 
+ pkg_check_modules(GLIB REQUIRED IMPORTED_TARGET glib-2.0 gio-2.0)
+ pkg_check_modules(GTK REQUIRED IMPORTED_TARGET gtk+-3.0)
+ 
+@@ -16,9 +17,9 @@ add_library(core_lib src/differential_privacy.cpp)
+ target_link_libraries(core_lib PUBLIC SQLite::SQLite3 PkgConfig::GLIB)
+ 
+ add_executable(edge-daemon src/main.cpp)
+-target_link_libraries(edge-daemon core_lib PkgConfig::GLIB pthread)
++target_link_libraries(edge-daemon core_lib PkgConfig::GLIB OpenSSL::Crypto pthread)
+ 
+ add_executable(chronos-applet src/applet.cpp)
+ target_link_libraries(chronos-applet PkgConfig::GTK PkgConfig::GLIB)
+ 
+diff --git a/edge-daemon/src/main.cpp b/edge-daemon/src/main.cpp
+index 72d73f3..9cf88ef 100644
+--- a/edge-daemon/src/main.cpp
++++ b/edge-daemon/src/main.cpp
+@@ -10,9 +10,16 @@
+ #include <cstring>
+ #include <sstream>
+ #include <gio/gio.h>
++#include <openssl/hmac.h>
++#include <openssl/evp.h>
++#include <openssl/crypto.h>
++#include <filesystem>
++#include <fstream>
++#include <algorithm>
++#include <iomanip>
+ #include "differential_privacy.h"
+ 
++std::atomic<bool> g_override_paused(false);
++std::chrono::steady_clock::time_point g_override_paused_until;
++
+ // Helper to parse double safely
+ bool parseDouble(const std::string& str, double& val) {
+     std::stringstream ss(str);
+@@ -42,6 +49,114 @@ bool extractDouble(const std::string& json, const std::string& key, double& out_
+     return false;
+ }
+ 
++// Helper to extract HTTP header values from raw request
++std::string getHeaderValue(const std::string& request, const std::string& header_name) {
++    size_t pos = request.find(header_name + ":");
++    if (pos == std::string::npos) {
++        std::string lower_header = header_name;
++        std::transform(lower_header.begin(), lower_header.end(), lower_header.begin(), ::tolower);
++        pos = request.find(lower_header + ":");
++        if (pos == std::string::npos) return "";
++    }
++    
++    size_t start = pos + header_name.length() + 1;
++    size_t end = request.find("\r\n", start);
++    if (end == std::string::npos) {
++        end = request.find("\n", start);
++    }
++    if (end == std::string::npos) return "";
++    
++    std::string val = request.substr(start, end - start);
++    size_t first = val.find_first_not_of(" \t");
++    size_t last = val.find_last_not_of(" \t\r\n");
++    if (first == std::string::npos || last == std::string::npos) return "";
++    return val.substr(first, last - first + 1);
++}
++
++// Helper to compute HMAC-SHA256 signature
++std::string computeHmacSha256(const std::string& secret, const std::string& message) {
++    unsigned char hash[EVP_MAX_MD_SIZE];
++    unsigned int length = 0;
++    
++    HMAC(EVP_sha256(), secret.c_str(), secret.length(),
++         reinterpret_cast<const unsigned char*>(message.c_str()), message.length(),
++         hash, &length);
++         
++    std::stringstream ss;
++    for (unsigned int i = 0; i < length; ++i) {
++        ss << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(hash[i]);
++    }
++    return ss.str();
++}
++
++// Constant time string comparison to prevent timing attacks
++bool constantTimeCompare(const std::string& a, const std::string& b) {
++    if (a.length() != b.length()) return false;
++    int diff = 0;
++    for (size_t i = 0; i < a.length(); ++i) {
++        diff |= (a[i] ^ b[i]);
++    }
++    return diff == 0;
++}
++
++// Verify request signature under F43 Secure IPC
++bool verifySignature(const std::string& method, const std::string& path, const std::string& request, const std::string& body) {
++    if (g_config.secret.empty()) {
++        return true; // Secret not set, signature checks disabled (permissive debug mode)
++    }
++    
++    std::string sig = getHeaderValue(request, "X-Signature");
++    std::string timestamp_str = getHeaderValue(request, "X-Timestamp");
++    
++    if (sig.empty() || timestamp_str.empty()) {
++        std::cerr << "[Security IPC] Verification failed: missing signature or timestamp." << std::endl;
++        return false;
++    }
++    
++    long long request_time = 0;
++    try {
++        request_time = std::stoll(timestamp_str);
++    } catch (...) {
++        return false;
++    }
++    
++    auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
++        std::chrono::system_clock::now().time_since_epoch()).count();
++    
++    // Enforce 60-second replay window
++    if (std::abs(now_ms - request_time) > 60000) {
++        std::cerr << "[Security IPC] Verification failed: replay attack window exceeded." << std::endl;
++        return false;
++    }
++    
++    std::string message = method + "\n" + path + "\n" + timestamp_str + "\n" + body;
++    std::string expected_sig = computeHmacSha256(g_config.secret, message);
++    
++    if (!constantTimeCompare(sig, expected_sig)) {
++        std::cerr << "[Security IPC] Verification failed: signature mismatch." << std::endl;
++        return false;
++    }
++    return true;
++}
++
++// Retrieve battery status under F48 Battery Status Power Saver
++int getBatteryLevel(bool& discharging) {
++    discharging = false;
++    std::string base_dir = "/sys/class/power_supply";
++    if (!std::filesystem::exists(base_dir)) return -1;
++    
++    int min_capacity = -1;
++    for (const auto& entry : std::filesystem::directory_iterator(base_dir)) {
++        std::ifstream status_file(entry.path() / "status");
++        std::ifstream cap_file(entry.path() / "capacity");
++        
++        if (status_file.is_open() && cap_file.is_open()) {
++            std::string status;
++            int capacity = -1;
++            if (status_file >> status && cap_file >> capacity) {
++                if (status == "Discharging") {
++                    discharging = true;
++                    return capacity;
++                }
++                if (min_capacity == -1 || capacity < min_capacity) {
++                    min_capacity = capacity;
++                }
++            }
++        }
++    }
++    return min_capacity;
++}
++
++// Unified tracking pause evaluator (handles DBus events + Global Pause Hotkey overrides)
++bool isTelemetryPaused() {
++    if (g_tracking_paused) {
++        return true;
++    }
++    if (g_override_paused) {
++        if (std::chrono::steady_clock::now() >= g_override_paused_until) {
++            g_override_paused = false;
++            std::cout << "[Daemon] Override pause has expired. Resuming tracking." << std::endl;
++            return false;
++        }
++        return true;
++    }
++    return false;
++}
++
+ // DBus callbacks
+ void on_prepare_for_sleep(GDBusConnection* connection,
+                           const gchar* sender_name,
+@@ -210,7 +325,7 @@ void backgroundTelemetryThread(const std::string& db_path) {
+         std::this_thread::sleep_for(std::chrono::seconds(10));
+         
+         // 1. Process Scanning (F37)
+-        if (!g_tracking_paused) {
++        if (!isTelemetryPaused()) {
+             auto active_tools = scanNativeProcesses();
+             for (const auto& tool : active_tools) {
+                 TelemetryEvent raw_event = { "dev_tool_" + tool, 10.0 };
+@@ -246,7 +361,7 @@ void backgroundTelemetryThread(const std::string& db_path) {
+         }
+         
+         // 2. Resource Telemetry (F44)
+-        if (!g_tracking_paused) {
++        if (!isTelemetryPaused()) {
+             if (has_cpu) {
+                 CpuStats curr_cpu;
+                 if (readCpuStats(curr_cpu)) {
+@@ -492,15 +607,43 @@ int main(int argc, char* argv[]) {
+ 
+         if (method == "GET" && path == "/status") {
++            if (!verifySignature(method, path, request, "")) {
++                std::string err_resp = "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n\r\n{\"error\":\"unauthorized\"}";
++                send(new_socket, err_resp.c_str(), err_resp.length(), 0);
++                close(new_socket);
++                continue;
++            }
+             double cumulative = getCumulativeEpsilon24h(DB_PATH);
++            bool discharging = false;
++            int battery_pct = getBatteryLevel(discharging);
++            
++            bool current_pause_state = isTelemetryPaused();
+             std::stringstream ss;
+             ss << "HTTP/1.1 200 OK\r\n"
+                << "Content-Type: application/json\r\n"
+                << "Access-Control-Allow-Origin: *\r\n\r\n"
+                << "{"
+-               << "\"paused\":" << (g_tracking_paused ? "true" : "false") << ","
++               << "\"paused\":" << (current_pause_state ? "true" : "false") << ","
+                << "\"epsilon\":" << g_config.epsilon << ","
+                << "\"sensitivity\":" << g_config.sensitivity << ","
+                << "\"budget\":" << g_config.budget << ","
+-               << "\"cumulative_epsilon\":" << cumulative
++               << "\"cumulative_epsilon\":" << cumulative << ","
++               << "\"battery_level\":" << battery_pct << ","
++               << "\"battery_discharging\":" << (discharging ? "true" : "false")
+                << "}";
+             std::string response = ss.str();
+             send(new_socket, response.c_str(), response.length(), 0);
+             close(new_socket);
+             continue;
+         } 
+         else if (method == "POST" && path == "/control") {
+             size_t body_pos = request.find("\r\n\r\n");
+             std::string body;
+             if (body_pos != std::string::npos) {
+                 body = request.substr(body_pos + 4);
+             } else {
+                 body_pos = request.find("\n\n");
+                 if (body_pos != std::string::npos) {
+                     body = request.substr(body_pos + 2);
+                 } else {
+                     body = request;
+                 }
+             }
+ 
++            if (!verifySignature(method, path, request, body)) {
++                std::string err_resp = "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n\r\n{\"error\":\"unauthorized\"}";
++                send(new_socket, err_resp.c_str(), err_resp.length(), 0);
++                close(new_socket);
++                continue;
++            }
++
+             std::string action = "";
+             size_t act_pos = body.find("\"action\"");
+             if (act_pos != std::string::npos) {
+@@ -544,7 +687,14 @@ int main(int argc, char* argv[]) {
+                 g_tracking_paused = true;
+                 success = true;
+             } else if (action == "resume") {
+                 g_tracking_paused = false;
++                g_override_paused = false;
+                 success = true;
++            } else if (action == "pause_override") {
++                double duration = 3600.0;
++                extractDouble(body, "duration", duration);
++                g_override_paused = true;
++                g_override_paused_until = std::chrono::steady_clock::now() + std::chrono::seconds(static_cast<int>(duration));
++                success = true;
+             } else if (action == "configure") {
+                 double new_epsilon;
+                 if (extractDouble(body, "epsilon", new_epsilon)) {
+@@ -581,13 +731,43 @@ int main(int argc, char* argv[]) {
+             continue;
+         }
+ 
+-        std::string response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n\r\n{\"status\":\"ok\"}";
+-        send(new_socket, response.c_str(), response.length(), 0);
+-        close(new_socket);
+-
+-        if (g_tracking_paused) {
+-            std::cout << "[Edge Daemon] Ingestion paused. Ignoring telemetry point." << std::endl;
+-            continue;
+-        }
+-
+         std::string active_window = "";
+         size_t pos = request.find("\"window\":\"");
+         if (pos != std::string::npos) {
+             size_t end_pos = request.find("\"", pos + 10);
+             if (end_pos != std::string::npos) {
+                 active_window = request.substr(pos + 10, end_pos - (pos + 10));
+             }
+         }
+ 
++        size_t body_pos = request.find("\r\n\r\n");
++        std::string body;
++        if (body_pos != std::string::npos) {
++            body = request.substr(body_pos + 4);
++        } else {
++            body_pos = request.find("\n\n");
++            if (body_pos != std::string::npos) {
++                body = request.substr(body_pos + 2);
++            } else {
++                body = request;
++            }
++        }
++
++        if (!verifySignature(method, path, request, body)) {
++            std::string err_resp = "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n\r\n{\"error\":\"unauthorized\"}";
++            send(new_socket, err_resp.c_str(), err_resp.length(), 0);
++            close(new_socket);
++            continue;
++        }
++
++        // Determine Dynamic Ingestion Interval (F40) & Battery Power Saver Throttling (F48)
++        bool discharging = false;
++        int battery_pct = getBatteryLevel(discharging);
++        int requested_interval = 10000; // default 10 seconds
++        if (discharging && battery_pct >= 0 && battery_pct < 20) {
++            requested_interval = 30000; // throttle frequency to 30 seconds
++        }
++
++        std::stringstream ss_resp;
++        ss_resp << "HTTP/1.1 200 OK\r\n"
++                << "Content-Type: application/json\r\n"
++                << "Access-Control-Allow-Origin: *\r\n\r\n"
++                << "{\"status\":\"ok\",\"requested_interval\":" << requested_interval << "}";
++        std::string response = ss_resp.str();
++        send(new_socket, response.c_str(), response.length(), 0);
++        close(new_socket);
++
++        if (isTelemetryPaused()) {
++            std::cout << "[Edge Daemon] Ingestion paused. Ignoring telemetry point." << std::endl;
++            continue;
++        }
++
+         if (!active_window.empty()) {
