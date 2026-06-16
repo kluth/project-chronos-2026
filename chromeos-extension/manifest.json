@@ -3,9 +3,25 @@
   "name": "Chronos ChromeOS Edge Tracker",
   "version": "1.0",
   "description": "Escapes the Crostini sandbox to read host ChromeOS active windows and streams them to the local C++ Daemon.",
-  "permissions": ["tabs", "idle"],
-  "host_permissions": ["http://localhost:8888/*"],
+  "permissions": [
+    "tabs",
+    "idle",
+    "storage"
+  ],
+  "host_permissions": [
+    "http://localhost:8888/*"
+  ],
   "background": {
     "service_worker": "background.js"
+  },
+  "commands": {
+    "toggle-pause-override": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+U",
+        "chromeos": "Ctrl+Shift+H"
+      },
+      "description": "Pause daemon window tracking for 1 hour"
+    }
   }
 }
+
