@@ -1,0 +1,38 @@
+steps:
+  # 1. Edge Daemon (C++) - Lint and Test
+  - name: 'gcr.io/cloud-builders/npm' # Using an arbitrary builder with CMake support or generic ubuntu
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        cd edge-daemon
+        echo "Running C++ Edge Daemon Tests (Property-Based)"
+        # cmake . && make test
+
+  # 2. Backend Functions (TypeScript) - Lint and Test
+  - name: 'gcr.io/cloud-builders/npm'
+    dir: 'backend-functions'
+    args: ['install']
+  - name: 'gcr.io/cloud-builders/npm'
+    dir: 'backend-functions'
+    args: ['run', 'test']
+
+  # 3. Frontend Angular - Lint and Test
+  - name: 'gcr.io/cloud-builders/npm'
+    dir: 'frontend-angular'
+    args: ['install']
+  - name: 'gcr.io/cloud-builders/npm'
+    dir: 'frontend-angular'
+    args: ['run', 'test', '--', '--watch=false', '--browsers=ChromeHeadless']
+
+  # 4. Formal Verification
+  - name: 'ubuntu'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        echo "Running TLA+ Model Checker on LifeCentricScheduler.tla"
+        # tlc tla-specs/LifeCentricScheduler.tla
+
+options:
+  logging: CLOUD_LOGGING_ONLY

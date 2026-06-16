@@ -1,0 +1,22 @@
+Start testing: Jun 16 11:06 CEST
+----------------------------------------------------------
+1/1 Testing: PropertyBasedDPTests
+1/1 Test: PropertyBasedDPTests
+Command: "/home/matthias/project/project-chronos/edge-daemon/edge-daemon-tests"
+Directory: /home/matthias/project/project-chronos/edge-daemon
+"PropertyBasedDPTests" start time: Jun 16 11:06 CEST
+Output:
+----------------------------------------------------------
+Running Differential Privacy Tests...
+[PASS] Laplace Noise Distribution Property Test (Epsilon = 0.5)
+[PASS] Telemetry Anonymization Test
+All tests passed successfully.
+<end of output>
+Test time =   0.03 sec
+----------------------------------------------------------
+Test Passed.
+"PropertyBasedDPTests" end time: Jun 16 11:06 CEST
+"PropertyBasedDPTests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Jun 16 11:06 CEST

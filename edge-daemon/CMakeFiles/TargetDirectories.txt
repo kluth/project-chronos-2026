@@ -1,0 +1,6 @@
+/home/matthias/project/project-chronos/edge-daemon/CMakeFiles/core_lib.dir
+/home/matthias/project/project-chronos/edge-daemon/CMakeFiles/edge-daemon.dir
+/home/matthias/project/project-chronos/edge-daemon/CMakeFiles/edge-daemon-tests.dir
+/home/matthias/project/project-chronos/edge-daemon/CMakeFiles/test.dir
+/home/matthias/project/project-chronos/edge-daemon/CMakeFiles/edit_cache.dir
+/home/matthias/project/project-chronos/edge-daemon/CMakeFiles/rebuild_cache.dir
