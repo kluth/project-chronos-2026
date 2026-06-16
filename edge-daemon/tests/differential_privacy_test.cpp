@@ -189,6 +189,15 @@ void testSharedFolderSnapshots() {
     std::cout << "[PASS] Automated Shared Folder Snapshots Test" << std::endl;
 }
 
+void testTrackingPaused() {
+    assert(g_tracking_paused == false);
+    g_tracking_paused = true;
+    assert(g_tracking_paused == true);
+    g_tracking_paused = false;
+    assert(g_tracking_paused == false);
+    std::cout << "[PASS] Tracking Paused Atomic Flag Test" << std::endl;
+}
+
 int main() {
     std::cout << "Running Differential Privacy Tests..." << std::endl;
     testLaplaceNoiseDistribution();
@@ -200,6 +209,7 @@ int main() {
     testProcessScanner();
     testResourcePerformanceTelemetry();
     testSharedFolderSnapshots();
+    testTrackingPaused();
     std::cout << "All tests passed successfully." << std::endl;
     return 0;
 }
