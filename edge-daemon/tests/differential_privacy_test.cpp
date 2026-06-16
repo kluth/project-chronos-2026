@@ -659,30 +659,27 @@ void testAdversarialGDPRMetrics() {
         }
     }
     std::cout << "  Out of 1000 anonymizations of 0 keystrokes, " << negative_count << " resulted in negative values." << std::endl;
-    if (negative_count > 0) {
-        std::cout << "[EXPECTED BUG CONFIRMED] Lack of clamping/bounds validation allows anonymized physical metrics to be negative (physically impossible)." << std::endl;
-    }
+    assert(negative_count == 0);
 
     // Challenge 2: Laplace noise with epsilon = 0.0 (division by zero)
     double noise_eps_zero = generateLaplaceNoise(1.0, 0.0);
     std::cout << "  Laplace noise with epsilon=0.0: " << noise_eps_zero << std::endl;
-    if (std::isinf(noise_eps_zero) || std::isnan(noise_eps_zero)) {
-        std::cout << "[EXPECTED BUG CONFIRMED] Laplace noise with epsilon=0.0 produces inf or nan, causing database or serialization corruption." << std::endl;
-    }
+    assert(noise_eps_zero == 0.0);
 
     // Challenge 3: Laplace noise with negative epsilon
     double noise_eps_neg = generateLaplaceNoise(1.0, -0.5);
     std::cout << "  Laplace noise with negative epsilon (-0.5): " << noise_eps_neg << std::endl;
-    if (std::isinf(noise_eps_neg) || std::isnan(noise_eps_neg)) {
-        std::cout << "[EXPECTED BUG CONFIRMED] Laplace noise with negative epsilon produces inf or nan." << std::endl;
-    }
+    assert(noise_eps_neg == 0.0);
 
     // Challenge 4: Laplace noise with tiny epsilon (1e-320)
     double noise_eps_tiny = generateLaplaceNoise(1.0, 1e-320);
     std::cout << "  Laplace noise with extremely small epsilon (1e-320): " << noise_eps_tiny << std::endl;
-    if (std::isinf(noise_eps_tiny) || std::isnan(noise_eps_tiny)) {
-        std::cout << "[EXPECTED BUG CONFIRMED] Laplace noise with tiny epsilon causes division overflow, returning inf or nan." << std::endl;
-    }
+    assert(noise_eps_tiny == 0.0);
+
+    // Test epsilon = 1e-300 (also tiny and <= 1e-15)
+    double noise_eps_300 = generateLaplaceNoise(1.0, 1e-300);
+    std::cout << "  Laplace noise with epsilon=1e-300: " << noise_eps_300 << std::endl;
+    assert(noise_eps_300 == 0.0);
 
     // Challenge 5: SQLite buffering and backup JSON serialization of inf/nan
     const std::string adv_db = "test_adv_gdpr.db";
@@ -696,9 +693,7 @@ void testAdversarialGDPRMetrics() {
     assert(bufferEvent(ev_inf, adv_db) == true);
     bool nan_buffer_res = bufferEvent(ev_nan, adv_db);
     std::cout << "  Buffering NaN event returned: " << (nan_buffer_res ? "true" : "false") << std::endl;
-    if (!nan_buffer_res) {
-        std::cout << "[EXPECTED BUG CONFIRMED] SQLite buffering of NaN values fails, causing silent telemetry data loss!" << std::endl;
-    }
+    assert(nan_buffer_res == true);
 
     // Clean backup directory first
     std::string backup_dir = getBackupDirPath();
@@ -711,18 +706,21 @@ void testAdversarialGDPRMetrics() {
     assert(backup_ok == true);
 
     // Read the backup file
+    bool backup_checked = false;
     for (const auto& entry : std::filesystem::directory_iterator(backup_dir, ec)) {
         if (entry.path().filename().string().rfind("chronos_backup_", 0) == 0) {
             std::ifstream file(entry.path());
             std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
             std::cout << "  Backup JSON content sample:\n" << content << std::endl;
-            if (content.find(": inf") != std::string::npos || content.find(": -inf") != std::string::npos || content.find(": nan") != std::string::npos) {
-                std::cout << "[EXPECTED BUG CONFIRMED] Backup JSON contains invalid JSON literals (inf, -inf, nan) which violates RFC 8259 JSON spec!" << std::endl;
-            }
+            assert(content.find(": inf") == std::string::npos);
+            assert(content.find(": -inf") == std::string::npos);
+            assert(content.find(": nan") == std::string::npos);
+            backup_checked = true;
             std::filesystem::remove(entry.path(), ec);
             break;
         }
     }
+    assert(backup_checked == true);
     std::remove(adv_db.c_str());
 
     std::cout << "[PASS] Adversarial GDPR Metrics Tests completed." << std::endl;
