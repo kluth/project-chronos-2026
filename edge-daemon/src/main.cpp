@@ -210,14 +210,23 @@ void backgroundTelemetryThread(const std::string& db_path) {
                 TelemetryEvent safe_event = anonymizeEvent(cleaned_event, current_epsilon);
                 logPrivacyEpsilon(current_epsilon, db_path);
                 
+                if (!std::isfinite(safe_event.value)) {
+                    std::cerr << "[Warning] safe_event.value is not finite (" << safe_event.value << ") for metric " << safe_event.metric_name << ". Clamping to 0.0." << std::endl;
+                    safe_event.value = 0.0;
+                }
+                
                 std::cout << "[Background Scanner] Found active process: " << tool << ". Buffering/transmitting..." << std::endl;
                 if (isNetworkOnline()) {
                     flushBuffer(db_path);
                     if (!runCurlSafe(safe_event.metric_name, safe_event.value)) {
-                        bufferEvent(safe_event, db_path);
+                        if (!bufferEvent(safe_event, db_path)) {
+                            std::cerr << "[Warning] Failed to buffer event to database: " << safe_event.metric_name << std::endl;
+                        }
                     }
                 } else {
-                    bufferEvent(safe_event, db_path);
+                    if (!bufferEvent(safe_event, db_path)) {
+                        std::cerr << "[Warning] Failed to buffer event to database: " << safe_event.metric_name << std::endl;
+                    }
                 }
             }
         }
@@ -622,6 +631,11 @@ int main(int argc, char* argv[]) {
             TelemetryEvent safe_event = anonymizeEvent(cleaned_event, current_epsilon);
             logPrivacyEpsilon(current_epsilon, DB_PATH);
             
+            if (!std::isfinite(safe_event.value)) {
+                std::cerr << "[Warning] safe_event.value is not finite (" << safe_event.value << ") for metric " << safe_event.metric_name << ". Clamping to 0.0." << std::endl;
+                safe_event.value = 0.0;
+            }
+            
             std::cout << "\n--- ChromeOS Host Ingestion Cycle ---" << std::endl;
             std::cout << "Metric: " << event.metric_name << " | Raw value: " << event.value << std::endl;
             std::cout << "Cleaned/Obfuscated: " << safe_event.metric_name << std::endl;
@@ -632,13 +646,17 @@ int main(int argc, char* argv[]) {
                 flushBuffer(DB_PATH);
                 if (!runCurlSafe(safe_event.metric_name, safe_event.value)) {
                     std::cout << "Upload failed. Buffering event..." << std::endl;
-                    bufferEvent(safe_event, DB_PATH);
+                    if (!bufferEvent(safe_event, DB_PATH)) {
+                        std::cerr << "[Warning] Failed to buffer event to database: " << safe_event.metric_name << std::endl;
+                    }
                 } else {
                     std::cout << "Uploaded successfully." << std::endl;
                 }
             } else {
                 std::cout << "Network Status:   OFFLINE | Buffering event..." << std::endl;
-                bufferEvent(safe_event, DB_PATH);
+                if (!bufferEvent(safe_event, DB_PATH)) {
+                    std::cerr << "[Warning] Failed to buffer event to database: " << safe_event.metric_name << std::endl;
+                }
             }
         };
 
