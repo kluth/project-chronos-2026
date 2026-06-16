@@ -8,27 +8,89 @@
 #include <netinet/in.h>
 #include <unistd.h>
 #include <cstring>
+#include <sstream>
 #include "differential_privacy.h"
 
-// Helper to execute OS-level command to push to Firebase
-std::string exec(const char* cmd) {
-    std::array<char, 128> buffer;
-    std::string result;
-    std::unique_ptr<FILE, decltype(&pclose)> pipe(popen(cmd, "r"), pclose);
-    if (!pipe) {
-        throw std::runtime_error("popen() failed!");
-    }
-    while (fgets(buffer.data(), buffer.size(), pipe.get()) != nullptr) {
-        result += buffer.data();
-    }
-    return result;
+// Helper to parse double safely
+bool parseDouble(const std::string& str, double& val) {
+    std::stringstream ss(str);
+    return (ss >> val) && ss.eof();
 }
 
-int main() {
+int main(int argc, char* argv[]) {
+    bool calibrate = false;
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--epsilon") {
+            if (i + 1 < argc) {
+                if (!parseDouble(argv[++i], g_config.epsilon)) {
+                    std::cerr << "Error: invalid value for --epsilon" << std::endl;
+                    return 1;
+                }
+            } else {
+                std::cerr << "Error: --epsilon requires a value" << std::endl;
+                return 1;
+            }
+        } else if (arg == "--sensitivity") {
+            if (i + 1 < argc) {
+                if (!parseDouble(argv[++i], g_config.sensitivity)) {
+                    std::cerr << "Error: invalid value for --sensitivity" << std::endl;
+                    return 1;
+                }
+            } else {
+                std::cerr << "Error: --sensitivity requires a value" << std::endl;
+                return 1;
+            }
+        } else if (arg == "--budget") {
+            if (i + 1 < argc) {
+                if (!parseDouble(argv[++i], g_config.budget)) {
+                    std::cerr << "Error: invalid value for --budget" << std::endl;
+                    return 1;
+                }
+            } else {
+                std::cerr << "Error: --budget requires a value" << std::endl;
+                return 1;
+            }
+        } else if (arg == "--secret") {
+            if (i + 1 < argc) {
+                g_config.secret = argv[++i];
+            } else {
+                std::cerr << "Error: --secret requires a value" << std::endl;
+                return 1;
+            }
+        } else if (arg == "--calibrate") {
+            calibrate = true;
+        } else {
+            std::cerr << "Unknown argument: " << arg << std::endl;
+            return 1;
+        }
+    }
+
+    if (calibrate) {
+        double scale = g_config.sensitivity / g_config.epsilon;
+        double variance = 2.0 * scale * scale;
+        double ci95 = scale * 2.99573227355;
+        double ci99 = scale * 4.60517018599;
+
+        std::cout << "DP Noise Bounds Calibration:\n";
+        std::cout << "Epsilon: " << g_config.epsilon << "\n";
+        std::cout << "Sensitivity: " << g_config.sensitivity << "\n";
+        std::cout << "Scale: " << scale << "\n";
+        std::cout << "Variance: " << variance << "\n";
+        std::cout << "95% Confidence Interval: [-" << ci95 << ", " << ci95 << "]\n";
+        std::cout << "99% Confidence Interval: [-" << ci99 << ", " << ci99 << "]\n";
+        return 0;
+    }
+
     std::cout << "[Edge Daemon] Initializing Chronos Local Tracker (Crostini Escaper Mode)..." << std::endl;
-    std::cout << "[Edge Daemon] Enforcing epsilon-Differential Privacy." << std::endl;
-    
-    double epsilon = 0.5; // High privacy regime
+    std::cout << "[Edge Daemon] Enforcing epsilon-Differential Privacy (Epsilon=" << g_config.epsilon 
+              << ", Sensitivity=" << g_config.sensitivity << ")." << std::endl;
+
+    const std::string DB_PATH = "telemetry_buffer.db";
+    if (!initDatabase(DB_PATH)) {
+        std::cerr << "Failed to initialize SQLite buffer database." << std::endl;
+        return 1;
+    }
 
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
     int opt = 1;
@@ -55,12 +117,10 @@ int main() {
         read(new_socket, buffer, 2048);
         std::string request(buffer);
 
-        // Send a simple CORS-friendly HTTP Response back to the Chrome Extension
         std::string response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n\r\n{\"status\":\"ok\"}";
         send(new_socket, response.c_str(), response.length(), 0);
         close(new_socket);
 
-        // Fast JSON extraction: {"window":"Active Tab Title"}
         std::string active_window = "";
         size_t pos = request.find("\"window\":\"");
         if (pos != std::string::npos) {
@@ -71,21 +131,38 @@ int main() {
         }
 
         if (!active_window.empty()) {
-            // We count 1 active ping = 10 seconds of usage on this window
             TelemetryEvent event = { active_window, 10.0 };
             
-            // Apply differential privacy BEFORE it ever leaves the device
-            TelemetryEvent safe_event = anonymizeEvent(event, epsilon);
+            // Clean/obfuscate title or URL before adding noise
+            std::string cleaned_metric = obfuscateDomainOrCategory(event.metric_name);
+            TelemetryEvent cleaned_event = { cleaned_metric, event.value };
+
+            // Apply differential privacy
+            TelemetryEvent safe_event = anonymizeEvent(cleaned_event, g_config.epsilon);
             
             std::cout << "\n--- ChromeOS Host Ingestion Cycle ---" << std::endl;
             std::cout << "Real Host Window: " << event.metric_name << " | Raw duration: " << event.value << "s" << std::endl;
+            std::cout << "Cleaned/Obfuscated: " << safe_event.metric_name << std::endl;
             std::cout << "Transmitting:     " << safe_event.metric_name << " | Anonymized: " << safe_event.value << "s" << std::endl;
             
-            // Transmit the safe data via curl to the DSGVO-compliant Firebase Backend
-            std::string curl_cmd = "curl -s -X POST -H \"Content-Type: application/json\" -d '{\"metric\":\"" + safe_event.metric_name + "\",\"val\":" + std::to_string(safe_event.value) + "}' https://europe-west3-project-chronos-2026.cloudfunctions.net/ingestTelemetry > /dev/null";
-            exec(curl_cmd.c_str());
+            if (isNetworkOnline()) {
+                std::cout << "Network Status:   ONLINE" << std::endl;
+                // Flush SQLite buffer FIFO
+                flushBuffer(DB_PATH);
+                // Attempt to send current event
+                if (!runCurlSafe(safe_event.metric_name, safe_event.value)) {
+                    std::cout << "Upload failed. Buffering event..." << std::endl;
+                    bufferEvent(safe_event, DB_PATH);
+                } else {
+                    std::cout << "Uploaded successfully." << std::endl;
+                }
+            } else {
+                std::cout << "Network Status:   OFFLINE | Buffering event..." << std::endl;
+                bufferEvent(safe_event, DB_PATH);
+            }
         }
     }
     
     return 0;
 }
+
