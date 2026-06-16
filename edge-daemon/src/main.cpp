@@ -17,6 +17,127 @@ bool parseDouble(const std::string& str, double& val) {
     return (ss >> val) && ss.eof();
 }
 
+void backgroundTelemetryThread(const std::string& db_path) {
+    std::cout << "[Background Monitor] Starting native process scanner and performance telemetry..." << std::endl;
+    
+    CpuStats prev_cpu;
+    bool has_cpu = readCpuStats(prev_cpu);
+    
+    auto last_backup_time = std::chrono::steady_clock::now();
+    const auto backup_interval = std::chrono::minutes(15);
+    
+    while (true) {
+        std::this_thread::sleep_for(std::chrono::seconds(10));
+        
+        // 1. Process Scanning (F37)
+        auto active_tools = scanNativeProcesses();
+        for (const auto& tool : active_tools) {
+            TelemetryEvent raw_event = { "dev_tool_" + tool, 10.0 };
+            std::string cleaned_metric = obfuscateDomainOrCategory(raw_event.metric_name);
+            TelemetryEvent cleaned_event = { cleaned_metric, raw_event.value };
+            
+            double cumulative = getCumulativeEpsilon24h(db_path);
+            double current_epsilon = g_config.epsilon;
+            
+            if (g_config.budget > 0.0 && cumulative >= g_config.budget) {
+                std::cout << "[Privacy Budget Check] Limit exceeded (" << cumulative << "/" << g_config.budget 
+                          << "). Skipping dev tool log for " << cleaned_event.metric_name << std::endl;
+                continue;
+            } else if (g_config.budget > 0.0 && cumulative >= 0.8 * g_config.budget) {
+                current_epsilon = calculateAdjustedEpsilon(g_config.epsilon, g_config.budget, cumulative);
+                std::cout << "[Privacy Budget Check] Approaching limit (" << cumulative << "/" << g_config.budget 
+                          << "). Adjusting epsilon to " << current_epsilon << std::endl;
+            }
+            
+            TelemetryEvent safe_event = anonymizeEvent(cleaned_event, current_epsilon);
+            logPrivacyEpsilon(current_epsilon, db_path);
+            
+            std::cout << "[Background Scanner] Found active process: " << tool << ". Buffering/transmitting..." << std::endl;
+            if (isNetworkOnline()) {
+                flushBuffer(db_path);
+                if (!runCurlSafe(safe_event.metric_name, safe_event.value)) {
+                    bufferEvent(safe_event, db_path);
+                }
+            } else {
+                bufferEvent(safe_event, db_path);
+            }
+        }
+        
+        // 2. Resource Telemetry (F44)
+        if (has_cpu) {
+            CpuStats curr_cpu;
+            if (readCpuStats(curr_cpu)) {
+                double cpu_util = calculateCpuUtilization(prev_cpu, curr_cpu);
+                prev_cpu = curr_cpu;
+                
+                TelemetryEvent raw_event = { "cpu_utilization", cpu_util };
+                std::string cleaned_metric = obfuscateDomainOrCategory(raw_event.metric_name);
+                TelemetryEvent cleaned_event = { cleaned_metric, raw_event.value };
+                
+                double cumulative = getCumulativeEpsilon24h(db_path);
+                double current_epsilon = g_config.epsilon;
+                
+                if (g_config.budget > 0.0 && cumulative >= g_config.budget) {
+                    std::cout << "[Privacy Budget Check] Limit exceeded. Skipping CPU telemetry." << std::endl;
+                } else {
+                    if (g_config.budget > 0.0 && cumulative >= 0.8 * g_config.budget) {
+                        current_epsilon = calculateAdjustedEpsilon(g_config.epsilon, g_config.budget, cumulative);
+                    }
+                    TelemetryEvent safe_event = anonymizeEvent(cleaned_event, current_epsilon);
+                    logPrivacyEpsilon(current_epsilon, db_path);
+                    
+                    if (isNetworkOnline()) {
+                        flushBuffer(db_path);
+                        if (!runCurlSafe(safe_event.metric_name, safe_event.value)) {
+                            bufferEvent(safe_event, db_path);
+                        }
+                    } else {
+                        bufferEvent(safe_event, db_path);
+                    }
+                }
+            }
+        } else {
+            has_cpu = readCpuStats(prev_cpu);
+        }
+        
+        double ram_util = 0.0;
+        if (getRamUtilization(ram_util)) {
+            TelemetryEvent raw_event = { "ram_utilization", ram_util };
+            std::string cleaned_metric = obfuscateDomainOrCategory(raw_event.metric_name);
+            TelemetryEvent cleaned_event = { cleaned_metric, raw_event.value };
+            
+            double cumulative = getCumulativeEpsilon24h(db_path);
+            double current_epsilon = g_config.epsilon;
+            
+            if (g_config.budget > 0.0 && cumulative >= g_config.budget) {
+                std::cout << "[Privacy Budget Check] Limit exceeded. Skipping RAM telemetry." << std::endl;
+            } else {
+                if (g_config.budget > 0.0 && cumulative >= 0.8 * g_config.budget) {
+                    current_epsilon = calculateAdjustedEpsilon(g_config.epsilon, g_config.budget, cumulative);
+                }
+                TelemetryEvent safe_event = anonymizeEvent(cleaned_event, current_epsilon);
+                logPrivacyEpsilon(current_epsilon, db_path);
+                
+                if (isNetworkOnline()) {
+                    flushBuffer(db_path);
+                    if (!runCurlSafe(safe_event.metric_name, safe_event.value)) {
+                        bufferEvent(safe_event, db_path);
+                    }
+                } else {
+                    bufferEvent(safe_event, db_path);
+                }
+            }
+        }
+        
+        // 3. Automated Backup Snapshot (F47)
+        auto now_time = std::chrono::steady_clock::now();
+        if (now_time - last_backup_time >= backup_interval) {
+            dumpBackupToJson(db_path);
+            last_backup_time = now_time;
+        }
+    }
+}
+
 int main(int argc, char* argv[]) {
     bool calibrate = false;
     for (int i = 1; i < argc; ++i) {
@@ -91,6 +212,13 @@ int main(int argc, char* argv[]) {
         std::cerr << "Failed to initialize SQLite buffer database." << std::endl;
         return 1;
     }
+    if (!initPrivacyBudgetTable(DB_PATH)) {
+        std::cerr << "Failed to initialize SQLite privacy budget log." << std::endl;
+        return 1;
+    }
+
+    std::thread bg_thread(backgroundTelemetryThread, DB_PATH);
+    bg_thread.detach();
 
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
     int opt = 1;
@@ -137,8 +265,22 @@ int main(int argc, char* argv[]) {
             std::string cleaned_metric = obfuscateDomainOrCategory(event.metric_name);
             TelemetryEvent cleaned_event = { cleaned_metric, event.value };
 
-            // Apply differential privacy
-            TelemetryEvent safe_event = anonymizeEvent(cleaned_event, g_config.epsilon);
+            // Apply differential privacy with budget check (F39)
+            double cumulative = getCumulativeEpsilon24h(DB_PATH);
+            double current_epsilon = g_config.epsilon;
+            
+            if (g_config.budget > 0.0 && cumulative >= g_config.budget) {
+                std::cout << "[Privacy Budget Check] Limit exceeded (" << cumulative << "/" << g_config.budget 
+                          << "). Ingestion paused for " << cleaned_event.metric_name << std::endl;
+                continue;
+            } else if (g_config.budget > 0.0 && cumulative >= 0.8 * g_config.budget) {
+                current_epsilon = calculateAdjustedEpsilon(g_config.epsilon, g_config.budget, cumulative);
+                std::cout << "[Privacy Budget Check] Approaching limit (" << cumulative << "/" << g_config.budget 
+                          << "). Adjusting epsilon to " << current_epsilon << std::endl;
+            }
+
+            TelemetryEvent safe_event = anonymizeEvent(cleaned_event, current_epsilon);
+            logPrivacyEpsilon(current_epsilon, DB_PATH);
             
             std::cout << "\n--- ChromeOS Host Ingestion Cycle ---" << std::endl;
             std::cout << "Real Host Window: " << event.metric_name << " | Raw duration: " << event.value << "s" << std::endl;

@@ -46,3 +46,33 @@ std::vector<BufferedEvent> getBufferedEvents(const std::string& db_path);
 bool deleteBufferedEvent(int id, const std::string& db_path);
 void flushBuffer(const std::string& db_path);
 
+// F39: Local Privacy Budget Tracker
+bool initPrivacyBudgetTable(const std::string& db_path);
+bool logPrivacyEpsilon(double epsilon, const std::string& db_path);
+double getCumulativeEpsilon24h(const std::string& db_path);
+double calculateAdjustedEpsilon(double base_epsilon, double budget, double cumulative_epsilon);
+
+// F37: Native Process Scanner /proc Monitor
+std::vector<std::string> scanNativeProcesses();
+
+// F44: Device Resource Performance Telemetry
+struct CpuStats {
+    unsigned long long user = 0;
+    unsigned long long nice = 0;
+    unsigned long long system = 0;
+    unsigned long long idle = 0;
+    unsigned long long iowait = 0;
+    unsigned long long irq = 0;
+    unsigned long long softirq = 0;
+    unsigned long long steal = 0;
+};
+
+bool readCpuStats(CpuStats& stats);
+double calculateCpuUtilization(const CpuStats& prev, const CpuStats& curr);
+bool getRamUtilization(double& ram_percent);
+
+// F47: Automated Shared Folder Snapshots
+std::string getBackupDirPath();
+bool dumpBackupToJson(const std::string& db_path);
+
+

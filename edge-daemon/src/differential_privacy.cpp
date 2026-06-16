@@ -8,6 +8,11 @@
 #include <vector>
 #include <algorithm>
 #include <cstring>
+#include <dirent.h>
+#include <fstream>
+#include <set>
+#include <filesystem>
+
 
 // For Network State Checker
 #include <ifaddrs.h>
@@ -412,4 +417,341 @@ void flushBuffer(const std::string& db_path) {
         }
     }
 }
+
+// F39: Local Privacy Budget Tracker
+bool initPrivacyBudgetTable(const std::string& db_path) {
+    sqlite3* db = nullptr;
+    int rc = sqlite3_open(db_path.c_str(), &db);
+    if (rc != SQLITE_OK) {
+        if (db) {
+            sqlite3_close(db);
+        }
+        return false;
+    }
+
+    const char* sql = "CREATE TABLE IF NOT EXISTS privacy_budget_log ("
+                      "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                      "epsilon REAL NOT NULL, "
+                      "timestamp INTEGER NOT NULL);";
+    char* err_msg = nullptr;
+    rc = sqlite3_exec(db, sql, nullptr, nullptr, &err_msg);
+    if (rc != SQLITE_OK) {
+        if (err_msg) {
+            sqlite3_free(err_msg);
+        }
+        sqlite3_close(db);
+        return false;
+    }
+
+    sqlite3_close(db);
+    return true;
+}
+
+bool logPrivacyEpsilon(double epsilon, const std::string& db_path) {
+    sqlite3* db = nullptr;
+    int rc = sqlite3_open(db_path.c_str(), &db);
+    if (rc != SQLITE_OK) {
+        if (db) {
+            sqlite3_close(db);
+        }
+        return false;
+    }
+
+    const char* sql = "INSERT INTO privacy_budget_log (epsilon, timestamp) VALUES (?, ?);";
+    sqlite3_stmt* stmt = nullptr;
+    rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        sqlite3_close(db);
+        return false;
+    }
+
+    sqlite3_bind_double(stmt, 1, epsilon);
+    sqlite3_bind_int64(stmt, 2, std::time(nullptr));
+
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+
+    return (rc == SQLITE_DONE);
+}
+
+double getCumulativeEpsilon24h(const std::string& db_path) {
+    sqlite3* db = nullptr;
+    int rc = sqlite3_open(db_path.c_str(), &db);
+    if (rc != SQLITE_OK) {
+        if (db) {
+            sqlite3_close(db);
+        }
+        return 0.0;
+    }
+
+    long long current_time = std::time(nullptr);
+    long long threshold = current_time - 86400; // 24h ago
+
+    // First clean up records older than 24h
+    {
+        const char* sql_cleanup = "DELETE FROM privacy_budget_log WHERE timestamp < ?;";
+        sqlite3_stmt* stmt_cleanup = nullptr;
+        if (sqlite3_prepare_v2(db, sql_cleanup, -1, &stmt_cleanup, nullptr) == SQLITE_OK) {
+            sqlite3_bind_int64(stmt_cleanup, 1, threshold);
+            sqlite3_step(stmt_cleanup);
+            sqlite3_finalize(stmt_cleanup);
+        }
+    }
+
+    double cumulative_epsilon = 0.0;
+    const char* sql = "SELECT SUM(epsilon) FROM privacy_budget_log WHERE timestamp >= ?;";
+    sqlite3_stmt* stmt = nullptr;
+    rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
+    if (rc == SQLITE_OK) {
+        sqlite3_bind_int64(stmt, 1, threshold);
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            cumulative_epsilon = sqlite3_column_double(stmt, 0);
+        }
+        sqlite3_finalize(stmt);
+    }
+
+    sqlite3_close(db);
+    return cumulative_epsilon;
+}
+
+double calculateAdjustedEpsilon(double base_epsilon, double budget, double cumulative_epsilon) {
+    if (budget <= 0.0 || cumulative_epsilon >= budget) {
+        return 0.0;
+    }
+    double warning_threshold = 0.8 * budget;
+    if (cumulative_epsilon < warning_threshold) {
+        return base_epsilon;
+    }
+    double remaining_ratio = (budget - cumulative_epsilon) / (budget - warning_threshold);
+    double adjusted = base_epsilon * remaining_ratio;
+    double min_epsilon = 0.005;
+    if (adjusted < min_epsilon) {
+        adjusted = min_epsilon;
+    }
+    return adjusted;
+}
+
+// F37: Native Process Scanner /proc Monitor
+std::vector<std::string> scanNativeProcesses() {
+    std::vector<std::string> detected;
+    DIR* dir = opendir("/proc");
+    if (!dir) return detected;
+    
+    struct dirent* entry = nullptr;
+    std::set<std::string> target_tools = {
+        "code", "code-oss", "bash", "zsh", "fish", "tmux", 
+        "python", "python3", "node", "docker", "git", 
+        "gcc", "g++", "make", "cmake"
+    };
+    
+    std::set<std::string> found;
+    
+    while ((entry = readdir(dir)) != nullptr) {
+        bool is_pid = true;
+        for (int i = 0; entry->d_name[i] != '\0'; ++i) {
+            if (!std::isdigit(entry->d_name[i])) {
+                is_pid = false;
+                break;
+            }
+        }
+        if (!is_pid || entry->d_name[0] == '\0') continue;
+        
+        std::string comm_path = std::string("/proc/") + entry->d_name + "/comm";
+        std::ifstream comm_file(comm_path);
+        if (comm_file.is_open()) {
+            std::string comm_name;
+            std::getline(comm_file, comm_name);
+            while (!comm_name.empty() && (comm_name.back() == '\n' || comm_name.back() == '\r' || comm_name.back() == ' ')) {
+                comm_name.pop_back();
+            }
+            if (target_tools.count(comm_name)) {
+                found.insert(comm_name);
+            }
+        }
+    }
+    closedir(dir);
+    
+    for (const auto& tool : found) {
+        detected.push_back(tool);
+    }
+    return detected;
+}
+
+// F44: Device Resource Performance Telemetry
+bool readCpuStats(CpuStats& stats) {
+    std::ifstream file("/proc/stat");
+    if (!file.is_open()) return false;
+    std::string line;
+    if (std::getline(file, line)) {
+        std::stringstream ss(line);
+        std::string cpu;
+        ss >> cpu;
+        if (cpu == "cpu") {
+            ss >> stats.user >> stats.nice >> stats.system >> stats.idle
+               >> stats.iowait >> stats.irq >> stats.softirq >> stats.steal;
+            return true;
+        }
+    }
+    return false;
+}
+
+double calculateCpuUtilization(const CpuStats& prev, const CpuStats& curr) {
+    unsigned long long prev_idle = prev.idle + prev.iowait;
+    unsigned long long curr_idle = curr.idle + curr.iowait;
+    
+    unsigned long long prev_non_idle = prev.user + prev.nice + prev.system + prev.irq + prev.softirq + prev.steal;
+    unsigned long long curr_non_idle = curr.user + curr.nice + curr.system + curr.irq + curr.softirq + curr.steal;
+    
+    unsigned long long prev_total = prev_idle + prev_non_idle;
+    unsigned long long curr_total = curr_idle + curr_non_idle;
+    
+    unsigned long long total_d = curr_total - prev_total;
+    unsigned long long idle_d = curr_idle - prev_idle;
+    
+    if (total_d == 0) return 0.0;
+    return static_cast<double>(total_d - idle_d) / total_d * 100.0;
+}
+
+bool getRamUtilization(double& ram_percent) {
+    std::ifstream file("/proc/meminfo");
+    if (!file.is_open()) return false;
+    
+    unsigned long long mem_total = 0;
+    unsigned long long mem_available = 0;
+    std::string key;
+    unsigned long long value;
+    std::string unit;
+    
+    int found_count = 0;
+    while (file >> key >> value >> unit) {
+        if (key == "MemTotal:") {
+            mem_total = value;
+            found_count++;
+        } else if (key == "MemAvailable:") {
+            mem_available = value;
+            found_count++;
+        }
+        if (found_count == 2) break;
+    }
+    
+    if (mem_total == 0) return false;
+    if (mem_available == 0) {
+        return false;
+    }
+    ram_percent = static_cast<double>(mem_total - mem_available) / mem_total * 100.0;
+    return true;
+}
+
+// F47: Automated Shared Folder Snapshots
+std::string getBackupDirPath() {
+    const char* home = std::getenv("HOME");
+    std::string path;
+    if (home) {
+        path = std::string(home) + "/Downloads/chronos_backups";
+    } else {
+        path = "./chronos_backups";
+    }
+    return path;
+}
+
+bool dumpBackupToJson(const std::string& db_path) {
+    std::string backup_dir = getBackupDirPath();
+    
+    try {
+        std::filesystem::create_directories(backup_dir);
+    } catch (const std::exception& e) {
+        std::cerr << "Failed to create backup directory: " << e.what() << std::endl;
+        return false;
+    }
+    
+    auto now = std::time(nullptr);
+    auto tm = *std::localtime(&now);
+    std::ostringstream oss;
+    oss << backup_dir << "/chronos_backup_" 
+        << std::put_time(&tm, "%Y%m%d_%H%M%S") << ".json";
+    std::string filename = oss.str();
+    
+    sqlite3* db = nullptr;
+    if (sqlite3_open(db_path.c_str(), &db) != SQLITE_OK) {
+        if (db) sqlite3_close(db);
+        return false;
+    }
+    
+    std::stringstream json;
+    json << "{\n";
+    json << "  \"timestamp\": " << now << ",\n";
+    
+    json << "  \"buffered_telemetry\": [\n";
+    const char* sql_tel = "SELECT id, metric_name, value, timestamp FROM telemetry_events ORDER BY id ASC;";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql_tel, -1, &stmt, nullptr) == SQLITE_OK) {
+        bool first = true;
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            if (!first) json << ",\n";
+            first = false;
+            
+            int id = sqlite3_column_int(stmt, 0);
+            const unsigned char* name = sqlite3_column_text(stmt, 1);
+            double val = sqlite3_column_double(stmt, 2);
+            long long ts = sqlite3_column_int64(stmt, 3);
+            
+            std::string metric_name = name ? reinterpret_cast<const char*>(name) : "";
+            std::string escaped_name = "";
+            for (char c : metric_name) {
+                if (c == '"' || c == '\\') {
+                    escaped_name += '\\';
+                }
+                escaped_name += c;
+            }
+            
+            json << "    {\n"
+                 << "      \"id\": " << id << ",\n"
+                 << "      \"metric_name\": \"" << escaped_name << "\",\n"
+                 << "      \"value\": " << val << ",\n"
+                 << "      \"timestamp\": " << ts << "\n"
+                 << "    }";
+        }
+        sqlite3_finalize(stmt);
+    }
+    json << "\n  ],\n";
+    
+    json << "  \"privacy_budget_log\": [\n";
+    const char* sql_pb = "SELECT id, epsilon, timestamp FROM privacy_budget_log ORDER BY id ASC;";
+    stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql_pb, -1, &stmt, nullptr) == SQLITE_OK) {
+        bool first = true;
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            if (!first) json << ",\n";
+            first = false;
+            
+            int id = sqlite3_column_int(stmt, 0);
+            double eps = sqlite3_column_double(stmt, 1);
+            long long ts = sqlite3_column_int64(stmt, 2);
+            
+            json << "    {\n"
+                 << "      \"id\": " << id << ",\n"
+                 << "      \"epsilon\": " << eps << ",\n"
+                 << "      \"timestamp\": " << ts << "\n"
+                 << "    }";
+        }
+        sqlite3_finalize(stmt);
+    }
+    json << "\n  ]\n";
+    json << "}\n";
+    
+    sqlite3_close(db);
+    
+    std::ofstream out_file(filename);
+    if (!out_file.is_open()) {
+        std::cerr << "Failed to write backup file: " << filename << std::endl;
+        return false;
+    }
+    out_file << json.str();
+    out_file.close();
+    
+    std::cout << "[Backup] SQLite tables backed up to " << filename << std::endl;
+    return true;
+}
+
 

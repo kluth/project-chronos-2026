@@ -100,6 +100,95 @@ void testNetworkChecker() {
     std::cout << "[PASS] Crostini Network State Checker Test (verification complete)" << std::endl;
 }
 
+void testPrivacyBudgetTracker() {
+    const std::string test_db = "test_budget.db";
+    std::remove(test_db.c_str());
+
+    assert(initPrivacyBudgetTable(test_db) == true);
+    
+    // Cumulative budget should be 0 initially
+    assert(getCumulativeEpsilon24h(test_db) == 0.0);
+
+    // Log some epsilon usage
+    assert(logPrivacyEpsilon(0.5, test_db) == true);
+    assert(logPrivacyEpsilon(0.3, test_db) == true);
+
+    // Cumulative should be 0.8
+    double cum = getCumulativeEpsilon24h(test_db);
+    assert(std::abs(cum - 0.8) < 1e-9);
+
+    // Test adjustment logic
+    double base_eps = 0.5;
+    double budget = 1.0;
+    
+    // Below warning threshold (warning threshold is 0.8 * budget = 0.8)
+    assert(calculateAdjustedEpsilon(base_eps, budget, 0.7) == base_eps);
+    
+    // At warning threshold
+    assert(calculateAdjustedEpsilon(base_eps, budget, 0.8) == base_eps);
+
+    // Midway between warning and budget (0.9 is halfway between 0.8 and 1.0)
+    // ratio = (1.0 - 0.9) / (1.0 - 0.8) = 0.1 / 0.2 = 0.5
+    // adjusted = base_eps * 0.5 = 0.25
+    double adjusted = calculateAdjustedEpsilon(base_eps, budget, 0.9);
+    assert(std::abs(adjusted - 0.25) < 1e-9);
+
+    // Exceeding budget
+    assert(calculateAdjustedEpsilon(base_eps, budget, 1.1) == 0.0);
+
+    std::remove(test_db.c_str());
+    std::cout << "[PASS] Local Privacy Budget Tracker Test" << std::endl;
+}
+
+void testProcessScanner() {
+    auto tools = scanNativeProcesses();
+    std::cout << "Process scanner run complete. Found " << tools.size() << " active target tools." << std::endl;
+    for (const auto& t : tools) {
+        std::cout << "  - " << t << std::endl;
+    }
+    std::cout << "[PASS] Native Process Scanner /proc Monitor Test" << std::endl;
+}
+
+void testResourcePerformanceTelemetry() {
+    CpuStats stats1, stats2;
+    bool read1 = readCpuStats(stats1);
+    std::cout << "CPU stats reading: " << (read1 ? "Success" : "Failure") << std::endl;
+    
+    if (read1) {
+        stats2 = stats1;
+        stats2.idle += 100;
+        stats2.user += 100;
+        double util = calculateCpuUtilization(stats1, stats2);
+        assert(std::abs(util - 50.0) < 1.0);
+    }
+
+    double ram_util = 0.0;
+    bool read_ram = getRamUtilization(ram_util);
+    std::cout << "RAM stats reading: " << (read_ram ? "Success" : "Failure") << std::endl;
+    if (read_ram) {
+        assert(ram_util >= 0.0 && ram_util <= 100.0);
+    }
+    std::cout << "[PASS] Device Resource Performance Telemetry Test" << std::endl;
+}
+
+void testSharedFolderSnapshots() {
+    const std::string test_db = "test_snapshot.db";
+    std::remove(test_db.c_str());
+
+    assert(initDatabase(test_db) == true);
+    assert(initPrivacyBudgetTable(test_db) == true);
+
+    TelemetryEvent ev = {"test-snap", 10.0};
+    assert(bufferEvent(ev, test_db) == true);
+    assert(logPrivacyEpsilon(0.5, test_db) == true);
+
+    bool backup_res = dumpBackupToJson(test_db);
+    assert(backup_res == true);
+
+    std::remove(test_db.c_str());
+    std::cout << "[PASS] Automated Shared Folder Snapshots Test" << std::endl;
+}
+
 int main() {
     std::cout << "Running Differential Privacy Tests..." << std::endl;
     testLaplaceNoiseDistribution();
@@ -107,6 +196,10 @@ int main() {
     testDomainObfuscation();
     testSQLiteBuffering();
     testNetworkChecker();
+    testPrivacyBudgetTracker();
+    testProcessScanner();
+    testResourcePerformanceTelemetry();
+    testSharedFolderSnapshots();
     std::cout << "All tests passed successfully." << std::endl;
     return 0;
 }
