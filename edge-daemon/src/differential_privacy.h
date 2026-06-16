@@ -2,6 +2,23 @@
 #include <string>
 #include <vector>
 #include <atomic>
+#include <chrono>
+
+extern std::atomic<bool> g_override_paused;
+extern std::chrono::steady_clock::time_point g_override_paused_until;
+
+// F43: Encrypted IPC Bridge
+std::string computeHmacSha256(const std::string& secret, const std::string& message);
+bool constantTimeCompare(const std::string& a, const std::string& b);
+std::string getHeaderValue(const std::string& request, const std::string& header_name);
+bool verifySignature(const std::string& method, const std::string& path, const std::string& request, const std::string& body);
+
+// F48: Battery Power Saver
+int getBatteryLevel(bool& discharging, const std::string& base_dir = "/sys/class/power_supply");
+
+// F50: Ingestion pause status evaluator
+bool isTelemetryPaused();
+
 
 extern std::atomic<bool> g_tracking_paused;
 

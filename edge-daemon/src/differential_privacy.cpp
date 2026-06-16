@@ -1,4 +1,8 @@
 #include "differential_privacy.h"
+#include <openssl/hmac.h>
+#include <openssl/evp.h>
+#include <openssl/crypto.h>
+#include <iomanip>
 #include <random>
 #include <cmath>
 #include <cctype>
@@ -35,6 +39,8 @@
 // Define global configuration
 DPConfig g_config;
 std::atomic<bool> g_tracking_paused(false);
+std::atomic<bool> g_override_paused(false);
+std::chrono::steady_clock::time_point g_override_paused_until;
 
 double generateLaplaceNoise(double sensitivity, double epsilon) {
     // scale (b) = sensitivity / epsilon
@@ -753,6 +759,132 @@ bool dumpBackupToJson(const std::string& db_path) {
     
     std::cout << "[Backup] SQLite tables backed up to " << filename << std::endl;
     return true;
+}
+
+std::string computeHmacSha256(const std::string& secret, const std::string& message) {
+    unsigned char hash[EVP_MAX_MD_SIZE];
+    unsigned int length = 0;
+    
+    HMAC(EVP_sha256(), secret.c_str(), secret.length(),
+         reinterpret_cast<const unsigned char*>(message.c_str()), message.length(),
+         hash, &length);
+         
+    std::stringstream ss;
+    for (unsigned int i = 0; i < length; ++i) {
+        ss << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(hash[i]);
+    }
+    return ss.str();
+}
+
+bool constantTimeCompare(const std::string& a, const std::string& b) {
+    if (a.length() != b.length()) return false;
+    int diff = 0;
+    for (size_t i = 0; i < a.length(); ++i) {
+        diff |= (a[i] ^ b[i]);
+    }
+    return diff == 0;
+}
+
+std::string getHeaderValue(const std::string& request, const std::string& header_name) {
+    size_t pos = request.find(header_name + ":");
+    if (pos == std::string::npos) {
+        std::string lower_header = header_name;
+        std::transform(lower_header.begin(), lower_header.end(), lower_header.begin(), ::tolower);
+        pos = request.find(lower_header + ":");
+        if (pos == std::string::npos) return "";
+    }
+    
+    size_t start = pos + header_name.length() + 1;
+    size_t end = request.find("\r\n", start);
+    if (end == std::string::npos) {
+        end = request.find("\n", start);
+    }
+    if (end == std::string::npos) return "";
+    
+    std::string val = request.substr(start, end - start);
+    size_t first = val.find_first_not_of(" \t");
+    size_t last = val.find_last_not_of(" \t\r\n");
+    if (first == std::string::npos || last == std::string::npos) return "";
+    return val.substr(first, last - first + 1);
+}
+
+bool verifySignature(const std::string& method, const std::string& path, const std::string& request, const std::string& body) {
+    if (g_config.secret.empty()) {
+        return true;
+    }
+    
+    std::string sig = getHeaderValue(request, "X-Signature");
+    std::string timestamp_str = getHeaderValue(request, "X-Timestamp");
+    
+    if (sig.empty() || timestamp_str.empty()) {
+        std::cerr << "[Security IPC] Verification failed: missing signature or timestamp." << std::endl;
+        return false;
+    }
+    
+    long long request_time = 0;
+    try {
+        request_time = std::stoll(timestamp_str);
+    } catch (...) {
+        return false;
+    }
+    
+    auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    
+    if (std::abs(now_ms - request_time) > 60000) {
+        std::cerr << "[Security IPC] Verification failed: replay attack window exceeded." << std::endl;
+        return false;
+    }
+    
+    std::string message = method + "\n" + path + "\n" + timestamp_str + "\n" + body;
+    std::string expected_sig = computeHmacSha256(g_config.secret, message);
+    
+    if (!constantTimeCompare(sig, expected_sig)) {
+        std::cerr << "[Security IPC] Verification failed: signature mismatch." << std::endl;
+        return false;
+    }
+    return true;
+}
+
+int getBatteryLevel(bool& discharging, const std::string& base_dir) {
+    discharging = false;
+    if (!std::filesystem::exists(base_dir)) return -1;
+    
+    int min_capacity = -1;
+    for (const auto& entry : std::filesystem::directory_iterator(base_dir)) {
+        std::ifstream status_file(entry.path() / "status");
+        std::ifstream cap_file(entry.path() / "capacity");
+        
+        if (status_file.is_open() && cap_file.is_open()) {
+            std::string status;
+            int capacity = -1;
+            if (status_file >> status && cap_file >> capacity) {
+                if (status == "Discharging") {
+                    discharging = true;
+                    return capacity;
+                }
+                if (min_capacity == -1 || capacity < min_capacity) {
+                    min_capacity = capacity;
+                }
+            }
+        }
+    }
+    return min_capacity;
+}
+
+bool isTelemetryPaused() {
+    if (g_tracking_paused) {
+        return true;
+    }
+    if (g_override_paused) {
+        if (std::chrono::steady_clock::now() >= g_override_paused_until) {
+            g_override_paused = false;
+            std::cout << "[Daemon] Override pause has expired. Resuming tracking." << std::endl;
+            return false;
+        }
+        return true;
+    }
+    return false;
 }
 
 
