@@ -153,6 +153,19 @@ edge-daemon/fast:
 .PHONY : edge-daemon/fast
 
 #=============================================================================
+# Target rules for targets named chronos-applet
+
+# Build rule for target.
+chronos-applet: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 chronos-applet
+.PHONY : chronos-applet
+
+# fast build rule for target.
+chronos-applet/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/chronos-applet.dir/build.make CMakeFiles/chronos-applet.dir/build
+.PHONY : chronos-applet/fast
+
+#=============================================================================
 # Target rules for targets named edge-daemon-tests
 
 # Build rule for target.
@@ -164,6 +177,30 @@ edge-daemon-tests: cmake_check_build_system
 edge-daemon-tests/fast:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/edge-daemon-tests.dir/build.make CMakeFiles/edge-daemon-tests.dir/build
 .PHONY : edge-daemon-tests/fast
+
+src/applet.o: src/applet.cpp.o
+.PHONY : src/applet.o
+
+# target to build an object file
+src/applet.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/chronos-applet.dir/build.make CMakeFiles/chronos-applet.dir/src/applet.cpp.o
+.PHONY : src/applet.cpp.o
+
+src/applet.i: src/applet.cpp.i
+.PHONY : src/applet.i
+
+# target to preprocess a source file
+src/applet.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/chronos-applet.dir/build.make CMakeFiles/chronos-applet.dir/src/applet.cpp.i
+.PHONY : src/applet.cpp.i
+
+src/applet.s: src/applet.cpp.s
+.PHONY : src/applet.s
+
+# target to generate assembly for a file
+src/applet.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/chronos-applet.dir/build.make CMakeFiles/chronos-applet.dir/src/applet.cpp.s
+.PHONY : src/applet.cpp.s
 
 src/differential_privacy.o: src/differential_privacy.cpp.o
 .PHONY : src/differential_privacy.o
@@ -246,9 +283,13 @@ help:
 	@echo "... edit_cache"
 	@echo "... rebuild_cache"
 	@echo "... test"
+	@echo "... chronos-applet"
 	@echo "... core_lib"
 	@echo "... edge-daemon"
 	@echo "... edge-daemon-tests"
+	@echo "... src/applet.o"
+	@echo "... src/applet.i"
+	@echo "... src/applet.s"
 	@echo "... src/differential_privacy.o"
 	@echo "... src/differential_privacy.i"
 	@echo "... src/differential_privacy.s"

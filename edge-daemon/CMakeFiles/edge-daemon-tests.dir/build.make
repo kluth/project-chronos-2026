@@ -97,6 +97,11 @@ edge-daemon-tests: CMakeFiles/edge-daemon-tests.dir/tests/differential_privacy_t
 edge-daemon-tests: CMakeFiles/edge-daemon-tests.dir/build.make
 edge-daemon-tests: CMakeFiles/edge-daemon-tests.dir/compiler_depend.ts
 edge-daemon-tests: libcore_lib.a
+edge-daemon-tests: /usr/lib/aarch64-linux-gnu/libgio-2.0.so
+edge-daemon-tests: /usr/lib/aarch64-linux-gnu/libgobject-2.0.so
+edge-daemon-tests: /usr/lib/aarch64-linux-gnu/libglib-2.0.so
+edge-daemon-tests: /usr/lib/aarch64-linux-gnu/libsqlite3.so
+edge-daemon-tests: /usr/lib/aarch64-linux-gnu/libcrypto.so
 edge-daemon-tests: CMakeFiles/edge-daemon-tests.dir/link.txt
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/home/matthias/project/project-chronos/edge-daemon/CMakeFiles --progress-num=$(CMAKE_PROGRESS_2) "Linking CXX executable edge-daemon-tests"
 	$(CMAKE_COMMAND) -E cmake_link_script CMakeFiles/edge-daemon-tests.dir/link.txt --verbose=$(VERBOSE)

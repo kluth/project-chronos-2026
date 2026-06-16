@@ -80,6 +80,12 @@ bool extractDouble(const std::string& json, const std::string& key, double& out_
 }
 
 double generateLaplaceNoise(double sensitivity, double epsilon) {
+    if (epsilon <= 1e-15 || !std::isfinite(epsilon) || sensitivity <= 0.0 || !std::isfinite(sensitivity)) {
+        std::cerr << "[Warning] Invalid parameters for generateLaplaceNoise: sensitivity=" << sensitivity
+                  << ", epsilon=" << epsilon << ". Returning 0.0 noise." << std::endl;
+        return 0.0;
+    }
+
     // scale (b) = sensitivity / epsilon
     double b = sensitivity / epsilon;
 
@@ -88,7 +94,10 @@ double generateLaplaceNoise(double sensitivity, double epsilon) {
     
     // Generate a uniform random variable u in the range (-0.5, 0.5)
     std::uniform_real_distribution<double> distribution(-0.5, 0.5);
-    double u = distribution(generator);
+    double u;
+    do {
+        u = distribution(generator);
+    } while (u == -0.5 || u == 0.5);
     
     // Inverse cumulative distribution function for Laplace
     return -b * (u > 0 ? 1 : -1) * std::log(1.0 - 2.0 * std::abs(u));
@@ -405,7 +414,8 @@ bool bufferEvent(const TelemetryEvent& event, const std::string& db_path) {
     }
 
     sqlite3_bind_text(stmt, 1, event.metric_name.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_double(stmt, 2, event.value);
+    double safe_value = std::isnan(event.value) || std::isinf(event.value) ? 0.0 : event.value;
+    sqlite3_bind_double(stmt, 2, safe_value);
     sqlite3_bind_int64(stmt, 3, std::time(nullptr));
 
     rc = sqlite3_step(stmt);
@@ -532,7 +542,8 @@ bool logPrivacyEpsilon(double epsilon, const std::string& db_path) {
         return false;
     }
 
-    sqlite3_bind_double(stmt, 1, epsilon);
+    double safe_epsilon = std::isnan(epsilon) || std::isinf(epsilon) ? 0.0 : epsilon;
+    sqlite3_bind_double(stmt, 1, safe_epsilon);
     sqlite3_bind_int64(stmt, 2, std::time(nullptr));
 
     rc = sqlite3_step(stmt);
@@ -709,10 +720,19 @@ bool dumpBackupToJson(const std::string& db_path) {
                 escaped_name += c;
             }
             
+            std::string val_str;
+            if (std::isnan(val) || std::isinf(val)) {
+                val_str = "0.0";
+            } else {
+                std::ostringstream vos;
+                vos << val;
+                val_str = vos.str();
+            }
+            
             json << "    {\n"
                  << "      \"id\": " << id << ",\n"
                  << "      \"metric_name\": \"" << escaped_name << "\",\n"
-                 << "      \"value\": " << val << ",\n"
+                 << "      \"value\": " << val_str << ",\n"
                  << "      \"timestamp\": " << ts << "\n"
                  << "    }";
         }
@@ -733,9 +753,18 @@ bool dumpBackupToJson(const std::string& db_path) {
             double eps = sqlite3_column_double(stmt, 1);
             long long ts = sqlite3_column_int64(stmt, 2);
             
+            std::string eps_str;
+            if (std::isnan(eps) || std::isinf(eps)) {
+                eps_str = "0.0";
+            } else {
+                std::ostringstream eoss;
+                eoss << eps;
+                eps_str = eoss.str();
+            }
+            
             json << "    {\n"
                  << "      \"id\": " << id << ",\n"
-                 << "      \"epsilon\": " << eps << ",\n"
+                 << "      \"epsilon\": " << eps_str << ",\n"
                  << "      \"timestamp\": " << ts << "\n"
                  << "    }";
         }

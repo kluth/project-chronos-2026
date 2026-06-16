@@ -4,6 +4,11 @@ edge-daemon-tests: \
   /usr/lib/gcc/aarch64-linux-gnu/14/crtbeginS.o \
   CMakeFiles/edge-daemon-tests.dir/tests/differential_privacy_test.cpp.o \
   libcore_lib.a \
+  /usr/lib/aarch64-linux-gnu/libgio-2.0.so \
+  /usr/lib/aarch64-linux-gnu/libgobject-2.0.so \
+  /usr/lib/aarch64-linux-gnu/libglib-2.0.so \
+  /usr/lib/aarch64-linux-gnu/libsqlite3.so \
+  /usr/lib/aarch64-linux-gnu/libcrypto.so \
   /usr/lib/gcc/aarch64-linux-gnu/14/libstdc++.so \
   /usr/lib/gcc/aarch64-linux-gnu/14/../../../aarch64-linux-gnu/libm.so \
   /usr/lib/gcc/aarch64-linux-gnu/14/../../../aarch64-linux-gnu/libm.so \
@@ -30,7 +35,9 @@ edge-daemon-tests: \
   /usr/lib/gcc/aarch64-linux-gnu/14/libgcc.a \
   /usr/lib/gcc/aarch64-linux-gnu/14/crtendS.o \
   /usr/lib/gcc/aarch64-linux-gnu/14/../../../aarch64-linux-gnu/crtn.o \
-  /lib/ld-linux-aarch64.so.1
+  /lib/ld-linux-aarch64.so.1 \
+  /lib/aarch64-linux-gnu/libz.so.1 \
+  /lib/aarch64-linux-gnu/libzstd.so.1
 
 /usr/lib/gcc/aarch64-linux-gnu/14/../../../aarch64-linux-gnu/Scrt1.o:
 
@@ -41,6 +48,16 @@ edge-daemon-tests: \
 CMakeFiles/edge-daemon-tests.dir/tests/differential_privacy_test.cpp.o:
 
 libcore_lib.a:
+
+/usr/lib/aarch64-linux-gnu/libgio-2.0.so:
+
+/usr/lib/aarch64-linux-gnu/libgobject-2.0.so:
+
+/usr/lib/aarch64-linux-gnu/libglib-2.0.so:
+
+/usr/lib/aarch64-linux-gnu/libsqlite3.so:
+
+/usr/lib/aarch64-linux-gnu/libcrypto.so:
 
 /usr/lib/gcc/aarch64-linux-gnu/14/libstdc++.so:
 
@@ -95,3 +112,7 @@ libcore_lib.a:
 /usr/lib/gcc/aarch64-linux-gnu/14/../../../aarch64-linux-gnu/crtn.o:
 
 /lib/ld-linux-aarch64.so.1:
+
+/lib/aarch64-linux-gnu/libz.so.1:
+
+/lib/aarch64-linux-gnu/libzstd.so.1:

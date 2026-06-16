@@ -65,12 +65,14 @@ CMAKE_BINARY_DIR = /home/matthias/project/project-chronos/edge-daemon
 # The main recursive "all" target.
 all: CMakeFiles/core_lib.dir/all
 all: CMakeFiles/edge-daemon.dir/all
+all: CMakeFiles/chronos-applet.dir/all
 all: CMakeFiles/edge-daemon-tests.dir/all
 .PHONY : all
 
 # The main recursive "codegen" target.
 codegen: CMakeFiles/core_lib.dir/codegen
 codegen: CMakeFiles/edge-daemon.dir/codegen
+codegen: CMakeFiles/chronos-applet.dir/codegen
 codegen: CMakeFiles/edge-daemon-tests.dir/codegen
 .PHONY : codegen
 
@@ -81,6 +83,7 @@ preinstall:
 # The main recursive "clean" target.
 clean: CMakeFiles/core_lib.dir/clean
 clean: CMakeFiles/edge-daemon.dir/clean
+clean: CMakeFiles/chronos-applet.dir/clean
 clean: CMakeFiles/edge-daemon-tests.dir/clean
 .PHONY : clean
 
@@ -91,7 +94,7 @@ clean: CMakeFiles/edge-daemon-tests.dir/clean
 CMakeFiles/core_lib.dir/all:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/core_lib.dir/build.make CMakeFiles/core_lib.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/core_lib.dir/build.make CMakeFiles/core_lib.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/matthias/project/project-chronos/edge-daemon/CMakeFiles --progress-num=1,2 "Built target core_lib"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/matthias/project/project-chronos/edge-daemon/CMakeFiles --progress-num=3,4 "Built target core_lib"
 .PHONY : CMakeFiles/core_lib.dir/all
 
 # Build rule for subdir invocation for target.
@@ -108,7 +111,7 @@ core_lib: CMakeFiles/core_lib.dir/rule
 # codegen rule for target.
 CMakeFiles/core_lib.dir/codegen:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/core_lib.dir/build.make CMakeFiles/core_lib.dir/codegen
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/matthias/project/project-chronos/edge-daemon/CMakeFiles --progress-num=1,2 "Finished codegen for target core_lib"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/matthias/project/project-chronos/edge-daemon/CMakeFiles --progress-num=3,4 "Finished codegen for target core_lib"
 .PHONY : CMakeFiles/core_lib.dir/codegen
 
 # clean rule for target.
@@ -123,7 +126,7 @@ CMakeFiles/core_lib.dir/clean:
 CMakeFiles/edge-daemon.dir/all: CMakeFiles/core_lib.dir/all
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/edge-daemon.dir/build.make CMakeFiles/edge-daemon.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/edge-daemon.dir/build.make CMakeFiles/edge-daemon.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/matthias/project/project-chronos/edge-daemon/CMakeFiles --progress-num=3,4 "Built target edge-daemon"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/matthias/project/project-chronos/edge-daemon/CMakeFiles --progress-num=5,6 "Built target edge-daemon"
 .PHONY : CMakeFiles/edge-daemon.dir/all
 
 # Build rule for subdir invocation for target.
@@ -140,7 +143,7 @@ edge-daemon: CMakeFiles/edge-daemon.dir/rule
 # codegen rule for target.
 CMakeFiles/edge-daemon.dir/codegen:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/edge-daemon.dir/build.make CMakeFiles/edge-daemon.dir/codegen
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/matthias/project/project-chronos/edge-daemon/CMakeFiles --progress-num=3,4 "Finished codegen for target edge-daemon"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/matthias/project/project-chronos/edge-daemon/CMakeFiles --progress-num=5,6 "Finished codegen for target edge-daemon"
 .PHONY : CMakeFiles/edge-daemon.dir/codegen
 
 # clean rule for target.
@@ -149,13 +152,45 @@ CMakeFiles/edge-daemon.dir/clean:
 .PHONY : CMakeFiles/edge-daemon.dir/clean
 
 #=============================================================================
+# Target rules for target CMakeFiles/chronos-applet.dir
+
+# All Build rule for target.
+CMakeFiles/chronos-applet.dir/all:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/chronos-applet.dir/build.make CMakeFiles/chronos-applet.dir/depend
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/chronos-applet.dir/build.make CMakeFiles/chronos-applet.dir/build
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/matthias/project/project-chronos/edge-daemon/CMakeFiles --progress-num=1,2 "Built target chronos-applet"
+.PHONY : CMakeFiles/chronos-applet.dir/all
+
+# Build rule for subdir invocation for target.
+CMakeFiles/chronos-applet.dir/rule: cmake_check_build_system
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/matthias/project/project-chronos/edge-daemon/CMakeFiles 2
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 CMakeFiles/chronos-applet.dir/all
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/matthias/project/project-chronos/edge-daemon/CMakeFiles 0
+.PHONY : CMakeFiles/chronos-applet.dir/rule
+
+# Convenience name for target.
+chronos-applet: CMakeFiles/chronos-applet.dir/rule
+.PHONY : chronos-applet
+
+# codegen rule for target.
+CMakeFiles/chronos-applet.dir/codegen:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/chronos-applet.dir/build.make CMakeFiles/chronos-applet.dir/codegen
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/matthias/project/project-chronos/edge-daemon/CMakeFiles --progress-num=1,2 "Finished codegen for target chronos-applet"
+.PHONY : CMakeFiles/chronos-applet.dir/codegen
+
+# clean rule for target.
+CMakeFiles/chronos-applet.dir/clean:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/chronos-applet.dir/build.make CMakeFiles/chronos-applet.dir/clean
+.PHONY : CMakeFiles/chronos-applet.dir/clean
+
+#=============================================================================
 # Target rules for target CMakeFiles/edge-daemon-tests.dir
 
 # All Build rule for target.
 CMakeFiles/edge-daemon-tests.dir/all: CMakeFiles/core_lib.dir/all
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/edge-daemon-tests.dir/build.make CMakeFiles/edge-daemon-tests.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/edge-daemon-tests.dir/build.make CMakeFiles/edge-daemon-tests.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/matthias/project/project-chronos/edge-daemon/CMakeFiles --progress-num=5,6 "Built target edge-daemon-tests"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/matthias/project/project-chronos/edge-daemon/CMakeFiles --progress-num=7,8 "Built target edge-daemon-tests"
 .PHONY : CMakeFiles/edge-daemon-tests.dir/all
 
 # Build rule for subdir invocation for target.
@@ -172,7 +207,7 @@ edge-daemon-tests: CMakeFiles/edge-daemon-tests.dir/rule
 # codegen rule for target.
 CMakeFiles/edge-daemon-tests.dir/codegen:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/edge-daemon-tests.dir/build.make CMakeFiles/edge-daemon-tests.dir/codegen
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/matthias/project/project-chronos/edge-daemon/CMakeFiles --progress-num=5,6 "Finished codegen for target edge-daemon-tests"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/matthias/project/project-chronos/edge-daemon/CMakeFiles --progress-num=7,8 "Finished codegen for target edge-daemon-tests"
 .PHONY : CMakeFiles/edge-daemon-tests.dir/codegen
 
 # clean rule for target.

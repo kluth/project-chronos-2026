@@ -1,1 +1,1 @@
-/usr/bin/c++ -Wl,--dependency-file=CMakeFiles/edge-daemon-tests.dir/link.d "CMakeFiles/edge-daemon-tests.dir/tests/differential_privacy_test.cpp.o" -o edge-daemon-tests  libcore_lib.a
+/usr/bin/c++ -Wl,--dependency-file=CMakeFiles/edge-daemon-tests.dir/link.d "CMakeFiles/edge-daemon-tests.dir/tests/differential_privacy_test.cpp.o" -o edge-daemon-tests  libcore_lib.a /usr/lib/aarch64-linux-gnu/libgio-2.0.so /usr/lib/aarch64-linux-gnu/libgobject-2.0.so /usr/lib/aarch64-linux-gnu/libglib-2.0.so /usr/lib/aarch64-linux-gnu/libsqlite3.so /usr/lib/aarch64-linux-gnu/libcrypto.so

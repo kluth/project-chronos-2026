@@ -4,7 +4,7 @@
 # compile CXX with /usr/bin/c++
 CXX_DEFINES = 
 
-CXX_INCLUDES = -I/home/matthias/project/project-chronos/edge-daemon/src
+CXX_INCLUDES = -I/home/matthias/project/project-chronos/edge-daemon/src -isystem /usr/include/glib-2.0 -isystem /usr/lib/aarch64-linux-gnu/glib-2.0/include -isystem /usr/include/sysprof-6 -isystem /usr/include/libmount -isystem /usr/include/blkid
 
-CXX_FLAGS = -std=gnu++17
+CXX_FLAGS = -std=gnu++17 -pthread
 

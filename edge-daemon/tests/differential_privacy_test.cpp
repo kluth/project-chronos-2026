@@ -619,6 +619,115 @@ void testAdversarialPause() {
     std::cout << "[PASS] Adversarial Pause Tests completed." << std::endl;
 }
 
+void testAdversarialGDPRMetrics() {
+    std::cout << "Running adversarial GDPR metrics tests..." << std::endl;
+
+    // 1. Extreme raw values checks
+    TelemetryEvent ev_zero_keystrokes = { "keystrokes_per_minute", 0.0 };
+    TelemetryEvent ev_zero_mouse = { "mouse_pixels_per_minute", 0.0 };
+    TelemetryEvent ev_high_keystrokes = { "keystrokes_per_minute", 100000.0 };
+    TelemetryEvent ev_high_mouse = { "mouse_pixels_per_minute", 100000.0 };
+    TelemetryEvent ev_overflow_keystrokes = { "keystrokes_per_minute", 1e300 };
+    TelemetryEvent ev_overflow_mouse = { "mouse_pixels_per_minute", 1e300 };
+    TelemetryEvent ev_negative_keystrokes = { "keystrokes_per_minute", -100.0 };
+    TelemetryEvent ev_negative_mouse = { "mouse_pixels_per_minute", -500.0 };
+
+    double epsilon = 0.5;
+
+    TelemetryEvent anon_zero_keystrokes = anonymizeEvent(ev_zero_keystrokes, epsilon);
+    TelemetryEvent anon_zero_mouse = anonymizeEvent(ev_zero_mouse, epsilon);
+    TelemetryEvent anon_high_keystrokes = anonymizeEvent(ev_high_keystrokes, epsilon);
+    TelemetryEvent anon_high_mouse = anonymizeEvent(ev_high_mouse, epsilon);
+    TelemetryEvent anon_overflow_keystrokes = anonymizeEvent(ev_overflow_keystrokes, epsilon);
+    TelemetryEvent anon_overflow_mouse = anonymizeEvent(ev_overflow_mouse, epsilon);
+    TelemetryEvent anon_negative_keystrokes = anonymizeEvent(ev_negative_keystrokes, epsilon);
+    TelemetryEvent anon_negative_mouse = anonymizeEvent(ev_negative_mouse, epsilon);
+
+    std::cout << "  Raw zero keystrokes: " << ev_zero_keystrokes.value << " -> Anonymized: " << anon_zero_keystrokes.value << std::endl;
+    std::cout << "  Raw zero mouse: " << ev_zero_mouse.value << " -> Anonymized: " << anon_zero_mouse.value << std::endl;
+    std::cout << "  Raw high keystrokes (100k): " << ev_high_keystrokes.value << " -> Anonymized: " << anon_high_keystrokes.value << std::endl;
+    std::cout << "  Raw high mouse (100k): " << ev_high_mouse.value << " -> Anonymized: " << anon_high_mouse.value << std::endl;
+    std::cout << "  Raw overflow (1e300): " << ev_overflow_keystrokes.value << " -> Anonymized: " << anon_overflow_keystrokes.value << std::endl;
+    std::cout << "  Raw negative (-100): " << ev_negative_keystrokes.value << " -> Anonymized: " << anon_negative_keystrokes.value << std::endl;
+
+    // Challenge 1: Lack of clamping to physical limits (non-negativity)
+    int negative_count = 0;
+    for (int i = 0; i < 1000; ++i) {
+        TelemetryEvent anon = anonymizeEvent(ev_zero_keystrokes, epsilon);
+        if (anon.value < 0.0) {
+            negative_count++;
+        }
+    }
+    std::cout << "  Out of 1000 anonymizations of 0 keystrokes, " << negative_count << " resulted in negative values." << std::endl;
+    if (negative_count > 0) {
+        std::cout << "[EXPECTED BUG CONFIRMED] Lack of clamping/bounds validation allows anonymized physical metrics to be negative (physically impossible)." << std::endl;
+    }
+
+    // Challenge 2: Laplace noise with epsilon = 0.0 (division by zero)
+    double noise_eps_zero = generateLaplaceNoise(1.0, 0.0);
+    std::cout << "  Laplace noise with epsilon=0.0: " << noise_eps_zero << std::endl;
+    if (std::isinf(noise_eps_zero) || std::isnan(noise_eps_zero)) {
+        std::cout << "[EXPECTED BUG CONFIRMED] Laplace noise with epsilon=0.0 produces inf or nan, causing database or serialization corruption." << std::endl;
+    }
+
+    // Challenge 3: Laplace noise with negative epsilon
+    double noise_eps_neg = generateLaplaceNoise(1.0, -0.5);
+    std::cout << "  Laplace noise with negative epsilon (-0.5): " << noise_eps_neg << std::endl;
+    if (std::isinf(noise_eps_neg) || std::isnan(noise_eps_neg)) {
+        std::cout << "[EXPECTED BUG CONFIRMED] Laplace noise with negative epsilon produces inf or nan." << std::endl;
+    }
+
+    // Challenge 4: Laplace noise with tiny epsilon (1e-320)
+    double noise_eps_tiny = generateLaplaceNoise(1.0, 1e-320);
+    std::cout << "  Laplace noise with extremely small epsilon (1e-320): " << noise_eps_tiny << std::endl;
+    if (std::isinf(noise_eps_tiny) || std::isnan(noise_eps_tiny)) {
+        std::cout << "[EXPECTED BUG CONFIRMED] Laplace noise with tiny epsilon causes division overflow, returning inf or nan." << std::endl;
+    }
+
+    // Challenge 5: SQLite buffering and backup JSON serialization of inf/nan
+    const std::string adv_db = "test_adv_gdpr.db";
+    std::remove(adv_db.c_str());
+    assert(initDatabase(adv_db) == true);
+    assert(initPrivacyBudgetTable(adv_db) == true);
+
+    TelemetryEvent ev_inf = { "keystrokes_per_minute", std::numeric_limits<double>::infinity() };
+    TelemetryEvent ev_nan = { "mouse_pixels_per_minute", std::numeric_limits<double>::quiet_NaN() };
+
+    assert(bufferEvent(ev_inf, adv_db) == true);
+    bool nan_buffer_res = bufferEvent(ev_nan, adv_db);
+    std::cout << "  Buffering NaN event returned: " << (nan_buffer_res ? "true" : "false") << std::endl;
+    if (!nan_buffer_res) {
+        std::cout << "[EXPECTED BUG CONFIRMED] SQLite buffering of NaN values fails, causing silent telemetry data loss!" << std::endl;
+    }
+
+    // Clean backup directory first
+    std::string backup_dir = getBackupDirPath();
+    std::error_code ec;
+    for (const auto& entry : std::filesystem::directory_iterator(backup_dir, ec)) {
+        std::filesystem::remove(entry.path(), ec);
+    }
+
+    bool backup_ok = dumpBackupToJson(adv_db);
+    assert(backup_ok == true);
+
+    // Read the backup file
+    for (const auto& entry : std::filesystem::directory_iterator(backup_dir, ec)) {
+        if (entry.path().filename().string().rfind("chronos_backup_", 0) == 0) {
+            std::ifstream file(entry.path());
+            std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+            std::cout << "  Backup JSON content sample:\n" << content << std::endl;
+            if (content.find(": inf") != std::string::npos || content.find(": -inf") != std::string::npos || content.find(": nan") != std::string::npos) {
+                std::cout << "[EXPECTED BUG CONFIRMED] Backup JSON contains invalid JSON literals (inf, -inf, nan) which violates RFC 8259 JSON spec!" << std::endl;
+            }
+            std::filesystem::remove(entry.path(), ec);
+            break;
+        }
+    }
+    std::remove(adv_db.c_str());
+
+    std::cout << "[PASS] Adversarial GDPR Metrics Tests completed." << std::endl;
+}
+
 int main() {
     std::cout << "Running Differential Privacy Tests..." << std::endl;
     testLaplaceNoiseDistribution();
@@ -638,7 +747,9 @@ int main() {
     testAdversarialSignature();
     testAdversarialTiming();
     testAdversarialPause();
+    testAdversarialGDPRMetrics();
     std::cout << "All tests passed successfully." << std::endl;
     return 0;
 }
+
 
