@@ -115,6 +115,17 @@ TelemetryEvent anonymizeEvent(const TelemetryEvent& raw_event, double epsilon) {
     double noise = generateLaplaceNoise(sensitivity, epsilon);
     anonymized.value += noise;
     
+    if (anonymized.metric_name == "keystrokes_per_minute" ||
+        anonymized.metric_name == "mouse_pixels_per_minute" ||
+        anonymized.metric_name == "active_minutes" ||
+        anonymized.metric_name.find("duration") != std::string::npos ||
+        anonymized.metric_name.find("_minutes") != std::string::npos ||
+        anonymized.metric_name.find("active") != std::string::npos) {
+        if (anonymized.value < 0.0) {
+            anonymized.value = 0.0;
+        }
+    }
+    
     return anonymized;
 }
 
