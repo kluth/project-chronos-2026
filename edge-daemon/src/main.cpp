@@ -246,30 +246,36 @@ int main(int argc, char* argv[]) {
         std::string arg = argv[i];
         if (arg == "--epsilon") {
             if (i + 1 < argc) {
-                if (!parseDouble(argv[++i], g_config.epsilon)) {
+                double temp;
+                if (!parseDouble(argv[++i], temp) || temp <= 0.0 || !std::isfinite(temp)) {
                     std::cerr << "Error: invalid value for --epsilon" << std::endl;
                     return 1;
                 }
+                g_config.epsilon = temp;
             } else {
                 std::cerr << "Error: --epsilon requires a value" << std::endl;
                 return 1;
             }
         } else if (arg == "--sensitivity") {
             if (i + 1 < argc) {
-                if (!parseDouble(argv[++i], g_config.sensitivity)) {
+                double temp;
+                if (!parseDouble(argv[++i], temp) || temp <= 0.0 || !std::isfinite(temp)) {
                     std::cerr << "Error: invalid value for --sensitivity" << std::endl;
                     return 1;
                 }
+                g_config.sensitivity = temp;
             } else {
                 std::cerr << "Error: --sensitivity requires a value" << std::endl;
                 return 1;
             }
         } else if (arg == "--budget") {
             if (i + 1 < argc) {
-                if (!parseDouble(argv[++i], g_config.budget)) {
+                double temp;
+                if (!parseDouble(argv[++i], temp) || temp <= 0.0 || !std::isfinite(temp)) {
                     std::cerr << "Error: invalid value for --budget" << std::endl;
                     return 1;
                 }
+                g_config.budget = temp;
             } else {
                 std::cerr << "Error: --budget requires a value" << std::endl;
                 return 1;
@@ -518,7 +524,26 @@ int main(int argc, char* argv[]) {
                 double new_sensitivity;
                 bool has_sens = extractDouble(body, "sensitivity", new_sensitivity);
                 
-                {
+                bool valid = true;
+                std::string validation_err = "";
+                if (has_eps && (new_epsilon <= 0.0 || !std::isfinite(new_epsilon))) {
+                    valid = false;
+                    validation_err += "epsilon must be strictly positive and finite; ";
+                }
+                if (has_sens && (new_sensitivity <= 0.0 || !std::isfinite(new_sensitivity))) {
+                    valid = false;
+                    validation_err += "sensitivity must be strictly positive and finite; ";
+                }
+                if (has_bud && (new_budget <= 0.0 || !std::isfinite(new_budget))) {
+                    valid = false;
+                    validation_err += "budget must be strictly positive and finite; ";
+                }
+                
+                if (!valid) {
+                    std::cerr << "[Warning] Invalid configure parameters: " << validation_err << std::endl;
+                    err_msg = "Invalid parameters: " + validation_err;
+                    success = false;
+                } else {
                     std::lock_guard<std::mutex> lock(g_config_mutex);
                     if (has_eps) {
                         g_config.epsilon = new_epsilon;
@@ -529,8 +554,8 @@ int main(int argc, char* argv[]) {
                     if (has_sens) {
                         g_config.sensitivity = new_sensitivity;
                     }
+                    success = true;
                 }
-                success = true;
             } else {
                 err_msg = "Invalid action: " + action;
             }
